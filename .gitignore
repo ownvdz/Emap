@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+
+# Oracle Wallet (절대 커밋 금지)
+wallet/
+*.zip
+Wallet_*
+
+.DS_Store
+개발일지.txt
