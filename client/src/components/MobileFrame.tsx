@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 
 const FRAME_WIDTH = 390; // iPhone 기준 너비
-const FRAME_HEIGHT = 844; // iPhone 기준 높이
+const FRAME_HEIGHT = 780; // iPhone 기준 높이
 
 export default function MobileFrame({ children }: { children: ReactNode }) {
   return (
