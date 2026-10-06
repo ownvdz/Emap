@@ -23,6 +23,20 @@ app.get('/api/db-check', async (req, res) => {
   }
 });
 
+app.get('/api/shelters', async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT SHELTER_ID, NAME, SHELTER_TYPE, ROAD_ADDRESS, LATITUDE, LONGITUDE, CAPACITY
+       FROM SHELTER
+       WHERE LATITUDE IS NOT NULL AND LONGITUDE IS NOT NULL`
+    );
+    res.json(result.rows);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 initPool()
   .then(() => app.listen(PORT, () => console.log(`Server on :${PORT}`)))
   .catch((e) => {
