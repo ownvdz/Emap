@@ -7,7 +7,8 @@
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
     "sync-shelters": "node src/scripts/syncShelters.js",
-    "geocode-shelters": "node src/scripts/geocodeShelters.js"
+    "geocode-shelters": "node src/scripts/geocodeShelters.js",
+    "init-schema": "node src/scripts/initSchema.js"
   },
   "keywords": [],
   "author": "",
