@@ -21,35 +21,44 @@ async function fetchPage(pageNo) {
   return data;
 }
 
+function toNumber(v) {
+  if (v === undefined || v === null) return null;
+  const n = Number(String(v).replace(/,/g, ''));
+  return Number.isFinite(n) ? n : null; // "-" 같은 값은 null
+}
+
 async function upsertShelter(item) {
+  const name = item.ordtm_prcuse_ty || item.mgc_nm || null;
+
   await query(
     `MERGE INTO SHELTER t
      USING (SELECT :sourceId AS SOURCE_ID FROM DUAL) s
      ON (t.SOURCE_ID = s.SOURCE_ID)
      WHEN MATCHED THEN UPDATE SET
-       SHELTER_TYPE = :shelterType, CAPACITY = :capacity, AREA_SQM = :area,
+       NAME = :shelterName, SHELTER_TYPE = :shelterType, CAPACITY = :capacity, AREA_SQM = :area,
        DETAIL_ADDRESS = :detailAddress, ROAD_ADDRESS = :roadAddress,
        LEGAL_DONG_CODE = :legalDongCode, NORMAL_USE_TYPE = :normalUseType,
        IS_OPEN = :isOpen, MANAGE_AGENCY = :manageAgency,
-       RAW_DATA = :raw, UPDATED_AT = SYSTIMESTAMP
+       RAW_DATA = :rawData, UPDATED_AT = SYSTIMESTAMP
      WHEN NOT MATCHED THEN INSERT
-       (SOURCE_ID, SHELTER_TYPE, CAPACITY, AREA_SQM, DETAIL_ADDRESS, ROAD_ADDRESS,
+       (SOURCE_ID, NAME, SHELTER_TYPE, CAPACITY, AREA_SQM, DETAIL_ADDRESS, ROAD_ADDRESS,
         LEGAL_DONG_CODE, NORMAL_USE_TYPE, IS_OPEN, MANAGE_AGENCY, RAW_DATA)
      VALUES
-       (:sourceId, :shelterType, :capacity, :area, :detailAddress, :roadAddress,
-        :legalDongCode, :normalUseType, :isOpen, :manageAgency, :raw)`,
+       (:sourceId, :shelterName, :shelterType, :capacity, :area, :detailAddress, :roadAddress,
+        :legalDongCode, :normalUseType, :isOpen, :manageAgency, :rawData)`,
     {
       sourceId: item.shunt_fclty_sn,
+      shelterName: name,
       shelterType: item.fclty_se,
-      capacity: item.shunt_posbl_nmpr_co ? Number(item.shunt_posbl_nmpr_co) : null,
-      area: item.fclty_ar ? Number(item.fclty_ar) : null,
+      capacity: toNumber(item.shunt_posbl_nmpr_co),
+      area: toNumber(item.fclty_ar),
       detailAddress: item.detail_adres,
       roadAddress: item.locplc_rdnmadr,
       legalDongCode: item.legaldong_code,
       normalUseType: item.ordtm_prcuse_ty,
       isOpen: item.opn_at,
       manageAgency: item.mgc_nm,
-      raw: JSON.stringify(item),
+      rawData: JSON.stringify(item),
     },
     { autoCommit: true }
   );
@@ -58,35 +67,37 @@ async function upsertShelter(item) {
 async function main() {
   await initPool();
 
-  // 1페이지만 먼저 받아서 응답 구조 확인
-  const first = await fetchPage(1);
-  console.log('=== 원본 응답 (상위 800자) ===');
-  console.log(JSON.stringify(first).slice(0, 800));
-  console.log('===============================');
-
   let pageNo = 1;
-  let totalCount = Infinity;
   let processed = 0;
-  let data = first;
+  let totalCount = null;
 
-  while (processed < totalCount) {
-    if (pageNo > 1) data = await fetchPage(pageNo);
+  while (true) {
+    const data = await fetchPage(pageNo);
 
-    const items = data.items ?? data.response?.body?.items ?? [];
-    const list = Array.isArray(items) ? items : items.item ?? [];
-    totalCount = Number(data.totalCount ?? data.response?.body?.totalCount ?? list.length);
-
-    if (list.length === 0) {
-      console.log('items를 찾지 못했습니다. 위 원본 응답 구조를 확인해주세요.');
+    if (data.header?.resultCode !== '00') {
+      console.error('API 오류:', data.header);
       break;
     }
+
+    const body = data.body ?? {};
+    let list = body.items?.item ?? [];
+    if (!Array.isArray(list)) list = [list]; // 결과가 1건이면 객체로 올 수 있음
+
+    if (totalCount === null && body.totalCount !== undefined) {
+      totalCount = Number(body.totalCount);
+      console.log(`전체 건수: ${totalCount}`);
+    }
+
+    if (list.length === 0) break;
 
     for (const item of list) {
       await upsertShelter(item);
     }
 
     processed += list.length;
-    console.log(`수집 진행: ${processed}/${totalCount}`);
+    console.log(`수집 진행: ${processed}${totalCount ? '/' + totalCount : ''}`);
+
+    if (totalCount && processed >= totalCount) break;
     pageNo++;
   }
 
