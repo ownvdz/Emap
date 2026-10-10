@@ -23,6 +23,8 @@ app.get('/api/db-check', async (req, res) => {
   }
 });
 
+const CATEGORIES = ['CIVIL_DEFENSE', 'EARTHQUAKE', 'TSUNAMI'];
+
 app.get('/api/shelters', async (req, res) => {
   const swLat = Number(req.query.swLat);
   const swLng = Number(req.query.swLng);
@@ -33,26 +35,49 @@ app.get('/api/shelters', async (req, res) => {
     return res.status(400).json({ error: 'swLat, swLng, neLat, neLng가 필요합니다.' });
   }
 
+  // categories 파라미터가 없으면 전체, 있으면 허용된 값만 사용
+  const categories =
+    req.query.categories === undefined
+      ? CATEGORIES
+      : String(req.query.categories).split(',').filter((c) => CATEGORIES.includes(c));
+
+  if (categories.length === 0) {
+    return res.json({ items: [], truncated: false });
+  }
+
   const limit = Math.min(Number(req.query.limit) || 500, 2000);
+
+  // IN (:cat0, :cat1, ...) 형태로 바인드 변수 생성 (값은 직접 SQL에 넣지 않음)
+  const catBinds = {};
+  const catPlaceholders = categories
+    .map((c, i) => {
+      catBinds[`cat${i}`] = c;
+      return `:cat${i}`;
+    })
+    .join(', ');
 
   try {
     const result = await query(
-      `SELECT SHELTER_ID, NAME, SHELTER_TYPE, ROAD_ADDRESS, CAPACITY, LATITUDE, LONGITUDE
+      `SELECT SHELTER_ID, CATEGORY, NAME, SHELTER_TYPE, ROAD_ADDRESS, DETAIL_ADDRESS,
+              CAPACITY, AREA_SQM, LATITUDE, LONGITUDE
        FROM SHELTER
        WHERE GEOCODE_STATUS = 'DONE'
+         AND CATEGORY IN (${catPlaceholders})
          AND LATITUDE BETWEEN :swLat AND :neLat
          AND LONGITUDE BETWEEN :swLng AND :neLng
        FETCH FIRST :maxRows ROWS ONLY`,
-      { swLat, neLat, swLng, neLng, maxRows: limit + 1 }
+      { ...catBinds, swLat, neLat, swLng, neLng, maxRows: limit + 1 }
     );
 
     const truncated = result.rows.length > limit;
     const items = result.rows.slice(0, limit).map((r) => ({
       id: r.SHELTER_ID,
+      category: r.CATEGORY,
       name: r.NAME,
       type: r.SHELTER_TYPE,
-      address: r.ROAD_ADDRESS,
+      address: r.ROAD_ADDRESS || r.DETAIL_ADDRESS,
       capacity: r.CAPACITY,
+      area: r.AREA_SQM,
       lat: r.LATITUDE,
       lng: r.LONGITUDE,
     }));
