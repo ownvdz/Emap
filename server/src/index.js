@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { initPool, query } from './db.js';
+import { decodeEntities } from './utils/text.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -73,9 +74,9 @@ app.get('/api/shelters', async (req, res) => {
     const items = result.rows.slice(0, limit).map((r) => ({
       id: r.SHELTER_ID,
       category: r.CATEGORY,
-      name: r.NAME,
-      type: r.SHELTER_TYPE,
-      address: r.ROAD_ADDRESS || r.DETAIL_ADDRESS,
+      name: decodeEntities(r.NAME),
+      type: decodeEntities(r.SHELTER_TYPE),
+      address: decodeEntities(r.ROAD_ADDRESS || r.DETAIL_ADDRESS),
       capacity: r.CAPACITY,
       area: r.AREA_SQM,
       lat: r.LATITUDE,
