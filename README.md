@@ -1,12 +1,5 @@
+발표자료
 https://ownvdz.github.io/Emap/
 
-
-BLE + WIFI-DIRECT
-
-
-# 구현 완료
-앱 기본 페이지
-네이버 맵 API 띄우기
-
-
-블루투스 기능 구상 필요!
+프로젝트 구현
+ownvdz.duckdns.org
