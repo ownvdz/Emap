@@ -38,7 +38,7 @@ export default function TabBar({ active, onChange }: TabBarProps) {
             justifyContent: 'center',
             gap: '2px',
             fontSize: '12px',
-            color: active === tab.key ? '#03C75A' : '#888', // 네이버 그린 느낌
+            color: active === tab.key ? '#03C75A' : '#888',
             cursor: 'pointer',
           }}
         >

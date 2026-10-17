@@ -1,7 +1,8 @@
 import type { ReactNode } from 'react';
 
-const FRAME_WIDTH = 390; // iPhone 기준 너비
-const FRAME_HEIGHT = 780; // iPhone 기준 높이
+// 화면 크기
+const FRAME_WIDTH = 390;
+const FRAME_HEIGHT = 780;
 
 export default function MobileFrame({ children }: { children: ReactNode }) {
   return (
@@ -12,7 +13,7 @@ export default function MobileFrame({ children }: { children: ReactNode }) {
         display: 'flex',
         justifyContent: 'center',
         alignItems: 'center',
-        background: '#525659', // 프레임 바깥 배경 (데스크톱에서 보일 때)
+        background: '#525659',
       }}
     >
       <div
