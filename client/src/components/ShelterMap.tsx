@@ -12,6 +12,7 @@ const CATEGORY_INFO: Record<Category, { label: string; color: string }> = {
 };
 
 const FALLBACK_INFO = { label: '기타', color: '#6B7280' };
+const MIXED_COLOR = '#374151'; // 종류가 섞인 묶음 마커 색
 
 interface Shelter {
   id: number;
@@ -27,33 +28,88 @@ interface Shelter {
 
 const MIN_ZOOM_TO_LOAD = 13;
 
-function buildInfoContent(s: Shelter): HTMLElement {
-  const info = CATEGORY_INFO[s.category] ?? FALLBACK_INFO;
+const infoOf = (c: Category) => CATEGORY_INFO[c] ?? FALLBACK_INFO;
 
-  const el = document.createElement('div');
-  el.style.cssText = 'padding:10px 12px;font-size:13px;line-height:1.5;max-width:220px;';
+// 같은 위치(소수점 5자리, 약 1m)의 대피소를 한 묶음으로 만듦
+function groupByLocation(items: Shelter[]): Shelter[][] {
+  const map = new Map<string, Shelter[]>();
+  for (const s of items) {
+    const key = `${s.lat.toFixed(5)},${s.lng.toFixed(5)}`;
+    const list = map.get(key);
+    if (list) list.push(s);
+    else map.set(key, [s]);
+  }
+  const groups = [...map.values()];
+  // 말풍선 안에서 종류 순서가 항상 같도록 정렬
+  groups.forEach((g) =>
+    g.sort((a, b) => CATEGORY_ORDER.indexOf(a.category) - CATEGORY_ORDER.indexOf(b.category))
+  );
+  return groups;
+}
 
-  const head = document.createElement('div');
-  const badge = document.createElement('span');
-  badge.textContent = info.label;
-  badge.style.cssText = `display:inline-block;margin-right:6px;padding:1px 6px;border-radius:8px;font-size:11px;color:#fff;background:${info.color};`;
-  const title = document.createElement('strong');
-  title.textContent = s.name ?? '이름 없음';
-  head.appendChild(badge);
-  head.appendChild(title);
-  el.appendChild(head);
+// 마커 모양: 1곳이면 색 점, 여러 곳이면 개수가 적힌 원
+function buildMarkerIcon(group: Shelter[]): { content: string; size: number } {
+  if (group.length === 1) {
+    const color = infoOf(group[0].category).color;
+    return {
+      content: `<div style="width:14px;height:14px;border-radius:50%;background:${color};border:2px solid #fff;box-shadow:0 0 3px rgba(0,0,0,0.5);"></div>`,
+      size: 18,
+    };
+  }
 
-  // 외부 데이터는 HTML 문자열이 아니라 textContent로 넣어 태그가 섞여도 안전하게 표시
-  const addLine = (text: string) => {
-    const p = document.createElement('div');
-    p.textContent = text;
-    el.appendChild(p);
+  const sameCategory = new Set(group.map((s) => s.category)).size === 1;
+  const color = sameCategory ? infoOf(group[0].category).color : MIXED_COLOR;
+  const label = group.length > 99 ? '99+' : String(group.length);
+
+  return {
+    content: `<div style="min-width:22px;height:22px;padding:0 4px;box-sizing:border-box;border-radius:11px;background:${color};color:#fff;border:2px solid #fff;box-shadow:0 0 3px rgba(0,0,0,0.5);font-size:11px;font-weight:600;line-height:18px;text-align:center;">${label}</div>`,
+    size: 26,
   };
+}
 
-  if (s.address) addLine(s.address);
-  if (s.type) addLine(`구분: ${s.type}`);
-  if (s.capacity != null) addLine(`수용 인원: ${s.capacity}명`);
-  if (s.area != null) addLine(`수용 가능 면적: ${s.area}㎡`);
+// 말풍선 내용: 외부 데이터는 textContent로만 넣어 태그가 섞여도 안전하게 표시
+function buildInfoContent(group: Shelter[]): HTMLElement {
+  const el = document.createElement('div');
+  el.style.cssText =
+    'padding:10px 12px;font-size:13px;line-height:1.5;width:230px;max-height:240px;overflow-y:auto;';
+
+  if (group.length > 1) {
+    const head = document.createElement('div');
+    head.style.cssText = 'font-weight:600;margin-bottom:8px;';
+    head.textContent = `이 위치의 대피소 ${group.length}곳`;
+    el.appendChild(head);
+  }
+
+  group.forEach((s, i) => {
+    const info = infoOf(s.category);
+    const item = document.createElement('div');
+    if (i > 0) {
+      item.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid #e5e7eb;';
+    }
+
+    const titleRow = document.createElement('div');
+    const badge = document.createElement('span');
+    badge.textContent = info.label;
+    badge.style.cssText = `display:inline-block;margin-right:6px;padding:1px 6px;border-radius:8px;font-size:11px;color:#fff;background:${info.color};`;
+    const title = document.createElement('strong');
+    title.textContent = s.name ?? '이름 없음';
+    titleRow.appendChild(badge);
+    titleRow.appendChild(title);
+    item.appendChild(titleRow);
+
+    const addLine = (text: string) => {
+      const p = document.createElement('div');
+      p.textContent = text;
+      item.appendChild(p);
+    };
+
+    if (s.address) addLine(s.address);
+    if (s.type) addLine(`구분: ${s.type}`);
+    if (s.capacity != null) addLine(`수용 인원: ${s.capacity}명`);
+    if (s.area != null) addLine(`수용 가능 면적: ${s.area}㎡`);
+
+    el.appendChild(item);
+  });
 
   return el;
 }
@@ -133,18 +189,15 @@ export default function ShelterMap() {
         const data: { items: Shelter[]; truncated: boolean } = await res.json();
 
         clearMarkers();
-        markers = data.items.map((s) => {
-          const color = (CATEGORY_INFO[s.category] ?? FALLBACK_INFO).color;
+        markers = groupByLocation(data.items).map((group) => {
+          const { content, size } = buildMarkerIcon(group);
           const marker = new naver.maps.Marker({
-            position: new naver.maps.LatLng(s.lat, s.lng),
+            position: new naver.maps.LatLng(group[0].lat, group[0].lng),
             map,
-            icon: {
-              content: `<div style="width:14px;height:14px;border-radius:50%;background:${color};border:2px solid #fff;box-shadow:0 0 3px rgba(0,0,0,0.5);"></div>`,
-              anchor: new naver.maps.Point(9, 9),
-            },
+            icon: { content, anchor: new naver.maps.Point(size / 2, size / 2) },
           });
           naver.maps.Event.addListener(marker, 'click', () => {
-            infoWindow.setContent(buildInfoContent(s));
+            infoWindow.setContent(buildInfoContent(group));
             infoWindow.open(map, marker);
           });
           return marker;
