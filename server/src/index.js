@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import { initPool, query } from './db.js';
 import { decodeEntities } from './utils/text.js';
+import { fetchAlerts, REGIONS } from './alerts.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -87,6 +88,21 @@ app.get('/api/shelters', async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: '대피소 조회 중 오류가 발생했습니다.' });
+  }
+});
+
+app.get('/api/alerts', async (req, res) => {
+  const region = String(req.query.region ?? '').trim();
+  if (!REGIONS.includes(region)) {
+    return res.status(400).json({ error: '지원하지 않는 지역입니다.' });
+  }
+
+  try {
+    res.json(await fetchAlerts(region));
+  } catch (e) {
+    // 키가 섞일 수 있는 e 전체는 출력하지 않고 필요한 부분만 기록
+    console.error('alerts error:', e.response?.status, e.response?.data ?? e.message);
+    res.status(502).json({ error: '재난문자를 불러오지 못했습니다.' });
   }
 });
 
