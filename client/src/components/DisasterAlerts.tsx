@@ -28,22 +28,52 @@ const LEVEL_COLOR: Record<string, string> = {
   안전안내: '#2563EB',
 };
 
-const STORAGE_KEY = 'emap.alertRegion';
+const REGION_KEY = 'emap.alertRegion';
+const SUB_KEY = 'emap.alertSub';
 const REFRESH_MS = 60_000;
 
+function readStored(key: string): string {
+  try {
+    return localStorage.getItem(key) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function writeStored(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* 저장이 막혀 있어도 동작에는 영향 없음 */
+  }
+}
+
+const selectStyle = {
+  flex: 1,
+  minWidth: 0,
+  padding: '8px 10px',
+  fontSize: 14,
+  borderRadius: 8,
+  border: '1px solid #d1d5db',
+} as const;
+
 export default function DisasterAlerts() {
-  const [region, setRegion] = useState<string>(() => {
-    try {
-      return localStorage.getItem(STORAGE_KEY) ?? '';
-    } catch {
-      return '';
-    }
-  });
+  const [region, setRegion] = useState<string>(() => readStored(REGION_KEY));
+  const [sub, setSub] = useState<string>(() => readStored(SUB_KEY));
+  const [tree, setTree] = useState<Record<string, string[]>>({});
   const [data, setData] = useState<AlertResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
+
+  // 시도별 시군구 목록 (실패해도 시도 선택은 계속 동작)
+  useEffect(() => {
+    fetch('/api/regions')
+      .then((r) => (r.ok ? r.json() : {}))
+      .then(setTree)
+      .catch(() => {});
+  }, []);
 
   const load = useCallback(async () => {
     if (!region) return;
@@ -54,9 +84,9 @@ export default function DisasterAlerts() {
 
     setLoading(true);
     try {
-      const res = await fetch(`/api/alerts?region=${encodeURIComponent(region)}`, {
-        signal: controller.signal,
-      });
+      const params = new URLSearchParams({ region });
+      if (sub) params.set('sub', sub);
+      const res = await fetch(`/api/alerts?${params}`, { signal: controller.signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setData(await res.json());
       setError(null);
@@ -67,7 +97,7 @@ export default function DisasterAlerts() {
     } finally {
       if (controllerRef.current === controller) setLoading(false);
     }
-  }, [region]);
+  }, [region, sub]);
 
   useEffect(() => {
     setData(null); // 지역이 바뀌면 이전 지역의 문자를 지움
@@ -80,16 +110,23 @@ export default function DisasterAlerts() {
       clearInterval(timer);
       controllerRef.current?.abort();
     };
-  }, [region, load]);
+  }, [region, sub, load]);
 
   const onChangeRegion = (value: string) => {
     setRegion(value);
-    try {
-      localStorage.setItem(STORAGE_KEY, value);
-    } catch {
-      /* 저장이 막혀 있어도 동작에는 영향 없음 */
-    }
+    setSub(''); // 시도를 바꾸면 시군구는 '전체'로 되돌림
+    writeStored(REGION_KEY, value);
+    writeStored(SUB_KEY, '');
   };
+
+  const onChangeSub = (value: string) => {
+    setSub(value);
+    writeStored(SUB_KEY, value);
+  };
+
+  // 저장돼 있던 시군구가 목록에 없더라도 선택값이 사라지지 않게 포함
+  const known = tree[region] ?? [];
+  const subOptions = sub && !known.includes(sub) ? [sub, ...known] : known;
 
   return (
     <section style={{ marginTop: 20 }}>
@@ -105,19 +142,31 @@ export default function DisasterAlerts() {
         </button>
       </div>
 
-      <select
-        value={region}
-        onChange={(e) => onChangeRegion(e.target.value)}
-        style={{ width: '100%', marginTop: 10, padding: '8px 10px', fontSize: 14, borderRadius: 8, border: '1px solid #d1d5db' }}
-      >
-        <option value="">지역을 선택하세요</option>
-        {REGIONS.map((r) => (
-          <option key={r} value={r}>{r}</option>
-        ))}
-      </select>
+      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+        <select value={region} onChange={(e) => onChangeRegion(e.target.value)} style={selectStyle}>
+          <option value="">시/도 선택</option>
+          {REGIONS.map((r) => (
+            <option key={r} value={r}>{r}</option>
+          ))}
+        </select>
+
+        <select
+          value={sub}
+          onChange={(e) => onChangeSub(e.target.value)}
+          disabled={!region}
+          style={selectStyle}
+        >
+          <option value="">전체</option>
+          {subOptions.map((s) => (
+            <option key={s} value={s}>{s}</option>
+          ))}
+        </select>
+      </div>
 
       {!region && (
-        <p style={{ color: '#6b7280', fontSize: 13 }}>지역을 선택하면 해당 지역의 최근 재난문자를 보여드립니다.</p>
+        <p style={{ color: '#6b7280', fontSize: 13 }}>
+          지역을 선택하면 해당 지역의 최근 재난문자를 보여드립니다.
+        </p>
       )}
 
       {error && <p style={{ color: '#DC2626', fontSize: 13 }}>{error}</p>}
@@ -130,7 +179,7 @@ export default function DisasterAlerts() {
 
       {region && data && data.items.length === 0 && !error && (
         <p style={{ color: '#6b7280', fontSize: 13 }}>
-          최근 {data.lookbackDays ?? 3}일 동안 이 지역으로 발송된 재난문자가 없습니다.
+          최근 {data.lookbackDays ?? 3}일 동안 {region}{sub ? ` ${sub}` : ''}(으)로 발송된 재난문자가 없습니다.
         </p>
       )}
 

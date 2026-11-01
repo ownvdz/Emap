@@ -4,6 +4,7 @@ import cors from 'cors';
 import { initPool, query } from './db.js';
 import { decodeEntities } from './utils/text.js';
 import { fetchAlerts, REGIONS } from './alerts.js';
+import { getRegionTree } from './regions.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -91,16 +92,29 @@ app.get('/api/shelters', async (req, res) => {
   }
 });
 
+app.get('/api/regions', async (req, res) => {
+  try {
+    res.json(await getRegionTree());
+  } catch (e) {
+    console.error('regions route error:', e.message);
+    res.status(500).json({ error: '지역 목록을 불러오지 못했습니다.' });
+  }
+});
+
 app.get('/api/alerts', async (req, res) => {
   const region = String(req.query.region ?? '').trim();
+  const sub = String(req.query.sub ?? '').trim();
+
   if (!REGIONS.includes(region)) {
     return res.status(400).json({ error: '지원하지 않는 지역입니다.' });
   }
+  if (sub && !/^[가-힣0-9 ]{1,20}$/.test(sub)) {
+    return res.status(400).json({ error: '잘못된 시군구 값입니다.' });
+  }
 
   try {
-    res.json(await fetchAlerts(region));
+    res.json(await fetchAlerts(region, sub));
   } catch (e) {
-    // 키가 섞일 수 있는 e 전체는 출력하지 않고 필요한 부분만 기록
     console.error('alerts error:', e.response?.status, e.response?.data ?? e.message);
     res.status(502).json({ error: '재난문자를 불러오지 못했습니다.' });
   }
