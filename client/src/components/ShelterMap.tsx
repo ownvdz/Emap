@@ -1,9 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNaverMapScript } from '../hooks/useNaverMapScript';
 
-type Category = 'CIVIL_DEFENSE' | 'EARTHQUAKE' | 'TSUNAMI';
+export type Category = 'CIVIL_DEFENSE' | 'EARTHQUAKE' | 'TSUNAMI';
 
 const CATEGORY_ORDER: Category[] = ['CIVIL_DEFENSE', 'EARTHQUAKE', 'TSUNAMI'];
+
+export interface MapRequest {
+  categories: Category[];
+  center?: { lat: number; lng: number };
+  nonce: number; // 같은 요청이 다시 와도 지도를 새로 만들게 하는 값
+}
 
 const CATEGORY_INFO: Record<Category, { label: string; color: string }> = {
   CIVIL_DEFENSE: { label: '민방위', color: '#2563EB' },
@@ -132,14 +138,17 @@ function buildInfoContent(group: Shelter[], onClose: () => void): HTMLElement {
   return wrapper;
 }
 
-export default function ShelterMap() {
+export default function ShelterMap({ request = null }: { request?: MapRequest | null }) {
   const mapRef = useRef<HTMLDivElement>(null);
   const { loaded, error } = useNaverMapScript();
   const [notice, setNotice] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Record<Category, boolean>>({
-    CIVIL_DEFENSE: true,
-    EARTHQUAKE: true,
-    TSUNAMI: true,
+  const [selected, setSelected] = useState<Record<Category, boolean>>(() => {
+    const only = request?.categories;
+    return {
+      CIVIL_DEFENSE: only ? only.includes('CIVIL_DEFENSE') : true,
+      EARTHQUAKE: only ? only.includes('EARTHQUAKE') : true,
+      TSUNAMI: only ? only.includes('TSUNAMI') : true,
+    };
   });
 
   // 지도 이벤트 안의 load()가 항상 최신 선택값을 읽도록 ref로 전달
@@ -156,9 +165,10 @@ export default function ShelterMap() {
     if (!loaded || !mapRef.current) return;
 
     const { naver } = window;
+    const center = request?.center;
     const map = new naver.maps.Map(mapRef.current, {
-      center: new naver.maps.LatLng(37.4563, 126.7052),
-      zoom: 14,
+      center: new naver.maps.LatLng(center?.lat ?? 37.4563, center?.lng ?? 126.7052),
+      zoom: center ? 13 : 14,
     });
     const infoWindow = new naver.maps.InfoWindow({ content: '' });
 

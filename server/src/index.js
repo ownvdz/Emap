@@ -120,6 +120,37 @@ app.get('/api/alerts', async (req, res) => {
   }
 });
 
+app.get('/api/map-center', async (req, res) => {
+  const region = String(req.query.region ?? '').trim();
+  const sub = String(req.query.sub ?? '').trim();
+  const category = String(req.query.category ?? '').trim();
+
+  if (!REGIONS.includes(region) || !CATEGORIES.includes(category)) {
+    return res.status(400).json({ error: '잘못된 요청입니다.' });
+  }
+  if (sub && !/^[가-힣0-9 ]{1,20}$/.test(sub)) {
+    return res.status(400).json({ error: '잘못된 시군구 값입니다.' });
+  }
+
+  const prefix = `${region}${sub ? ` ${sub}` : ''}%`;
+
+  try {
+    const result = await query(
+      `SELECT MEDIAN(LATITUDE) AS LAT, MEDIAN(LONGITUDE) AS LNG, COUNT(*) AS CNT
+       FROM SHELTER
+       WHERE GEOCODE_STATUS = 'DONE'
+         AND CATEGORY = :category
+         AND COALESCE(ROAD_ADDRESS, DETAIL_ADDRESS) LIKE :prefix`,
+      { category, prefix }
+    );
+    const row = result.rows[0];
+    res.json({ lat: row.LAT, lng: row.LNG, count: row.CNT });
+  } catch (e) {
+    console.error('map-center error:', e.message);
+    res.status(500).json({ error: '중심 좌표를 구하지 못했습니다.' });
+  }
+});
+
 initPool()
   .then(() => app.listen(PORT, () => console.log(`Server on :${PORT}`)))
   .catch((e) => {

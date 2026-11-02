@@ -1,4 +1,5 @@
 import DisasterAlerts from './DisasterAlerts';
+import { NotificationToggle } from './EmergencyWatcher';
 
 export default function HomeScreen() {
   return (
@@ -7,6 +8,7 @@ export default function HomeScreen() {
       <p style={{ color: '#4b5563', fontSize: 14 }}>가까운 비상대피소를 찾고, 정보를 공유하세요.</p>
 
       <DisasterAlerts />
+      <NotificationToggle />
     </div>
   );
 }

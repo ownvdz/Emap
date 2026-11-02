@@ -117,11 +117,13 @@ export default function DisasterAlerts() {
     setSub(''); // 시도를 바꾸면 시군구는 '전체'로 되돌림
     writeStored(REGION_KEY, value);
     writeStored(SUB_KEY, '');
+    window.dispatchEvent(new Event('emap:region-changed'));
   };
 
   const onChangeSub = (value: string) => {
     setSub(value);
     writeStored(SUB_KEY, value);
+    window.dispatchEvent(new Event('emap:region-changed'));
   };
 
   // 저장돼 있던 시군구가 목록에 없더라도 선택값이 사라지지 않게 포함
