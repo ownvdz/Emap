@@ -94,6 +94,20 @@ function notifyUser(a: Alert) {
   }
 }
 
+function getPosition(): Promise<GeolocationPosition> {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error('geolocation unsupported'));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(resolve, reject, {
+      enableHighAccuracy: true,
+      timeout: 8000, // 위급 상황이라 오래 기다리지 않고 지역 기준으로 넘어감
+      maximumAge: 60_000,
+    });
+  });
+}
+
 export default function EmergencyWatcher({
   onShowShelters,
 }: {
@@ -102,6 +116,7 @@ export default function EmergencyWatcher({
   const [queue, setQueue] = useState<Alert[]>([]);
   const known = useRef(new Set<string>()); // 이번에 이미 큐에 넣은 문자 id
   const dismissBtn = useRef<HTMLButtonElement>(null);
+  const [locating, setLocating] = useState(false);
 
   const poll = useCallback(async () => {
     const region = readStored(REGION_KEY);
@@ -189,15 +204,42 @@ export default function EmergencyWatcher({
 
   const showShelters = async () => {
     const category = guidance.shelterCategory;
-    if (!category) return;
+    if (!category || locating) return;
 
-    const region = readStored(REGION_KEY);
-    const sub = readStored(SUB_KEY);
+    setLocating(true);
+    let origin: { lat: number; lng: number } | undefined;
+    let nearest: MapRequest['nearest'];
     let center: { lat: number; lng: number } | undefined;
+    let note: string | undefined;
 
-    if (region) {
+    // 1) 현재 위치 기준 (HTTPS 주소와 위치 권한이 필요)
+    try {
+      const pos = await getPosition();
+      const here = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+      const params = new URLSearchParams({
+        lat: String(here.lat),
+        lng: String(here.lng),
+        category,
+        limit: '50',
+      });
+      const res = await fetch(`/api/shelters/nearby?${params}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      origin = here;
+      nearest = data.items;
+      if (!data.items?.length) note = '이 종류의 대피장소 데이터가 없습니다.';
+    } catch {
+      note = window.isSecureContext
+        ? '현재 위치를 가져오지 못해 선택한 지역 기준으로 표시합니다. 위치 권한을 확인해주세요.'
+        : '현재 위치는 HTTPS 주소에서만 사용할 수 있어 선택한 지역 기준으로 표시합니다.';
+    }
+
+    // 2) 위치를 못 구했으면 선택한 지역의 중심으로
+    const region = readStored(REGION_KEY);
+    if (!origin && region) {
       try {
         const params = new URLSearchParams({ region, category });
+        const sub = readStored(SUB_KEY);
         if (sub) params.set('sub', sub);
         const res = await fetch(`/api/map-center?${params}`);
         if (res.ok) {
@@ -209,8 +251,9 @@ export default function EmergencyWatcher({
       }
     }
 
+    setLocating(false);
     dismiss(current);
-    onShowShelters({ categories: [category], center, nonce: Date.now() });
+    onShowShelters({ categories: [category], center, origin, nearest, note, nonce: Date.now() });
   };
 
   return (
@@ -280,7 +323,7 @@ export default function EmergencyWatcher({
           {current.message}
         </p>
 
-        <h3 style={{ margin: '14px 0 6px', fontSize: 15 }}>{guidance.title} (요약)</h3>
+        <h3 style={{ margin: '14px 0 6px', fontSize: 15 }}>{guidance.title}</h3>
         <ol style={{ margin: 0, paddingLeft: 20, fontSize: 14, lineHeight: 1.55 }}>
           {guidance.steps.map((s) => (
             <li key={s} style={{ marginBottom: 4 }}>{s}</li>
@@ -302,9 +345,19 @@ export default function EmergencyWatcher({
             <button
               type="button"
               onClick={showShelters}
-              style={{ padding: '12px 0', fontSize: 15, borderRadius: 10, border: 'none', background: color, color: '#fff', cursor: 'pointer' }}
+              disabled={locating}
+              style={{
+                padding: '12px 0',
+                fontSize: 15,
+                borderRadius: 10,
+                border: 'none',
+                background: color,
+                color: '#fff',
+                cursor: 'pointer',
+                opacity: locating ? 0.7 : 1,
+              }}
             >
-              {guidance.shelterLabel ?? '대피장소 보기'}
+              {locating ? '현재 위치 확인 중…' : guidance.shelterLabel ?? '대피장소 보기'}
             </button>
           )}
           <button

@@ -5,12 +5,6 @@ export type Category = 'CIVIL_DEFENSE' | 'EARTHQUAKE' | 'TSUNAMI';
 
 const CATEGORY_ORDER: Category[] = ['CIVIL_DEFENSE', 'EARTHQUAKE', 'TSUNAMI'];
 
-export interface MapRequest {
-  categories: Category[];
-  center?: { lat: number; lng: number };
-  nonce: number; // 같은 요청이 다시 와도 지도를 새로 만들게 하는 값
-}
-
 const CATEGORY_INFO: Record<Category, { label: string; color: string }> = {
   CIVIL_DEFENSE: { label: '민방위', color: '#2563EB' },
   EARTHQUAKE: { label: '지진', color: '#F97316' },
@@ -30,11 +24,28 @@ interface Shelter {
   area: number | null;
   lat: number;
   lng: number;
+  distKm?: number; // 현재 위치에서의 거리 (가까운 대피소 조회일 때만)
+}
+
+export interface MapRequest {
+  categories: Category[];
+  center?: { lat: number; lng: number };   // 현재 위치를 못 구했을 때 쓰는 선택 지역의 중심
+  origin?: { lat: number; lng: number };   // 현재 위치
+  nearest?: Shelter[];                     // 현재 위치에서 가까운 순
+  note?: string;                           // 지도에 함께 보여줄 안내
+  nonce: number;                           // 같은 요청이 다시 와도 지도를 새로 만들게 하는 값
 }
 
 const MIN_ZOOM_TO_LOAD = 13;
+const FIT_RADIUS_KM = 2;  // 이 거리 안의 대피소를 한 화면에 담음
+const FIT_COUNT = 50;     // 한 화면에 담을 최대 개수
 
 const infoOf = (c: Category) => CATEGORY_INFO[c] ?? FALLBACK_INFO;
+
+function fmtDist(km?: number): string {
+  if (km == null) return '';
+  return km < 1 ? `${Math.round(km * 1000)}m` : `${km.toFixed(1)}km`;
+}
 
 // 같은 위치(소수점 5자리, 약 1m)의 대피소를 한 묶음으로 만듦
 function groupByLocation(items: Shelter[]): Shelter[][] {
@@ -126,6 +137,7 @@ function buildInfoContent(group: Shelter[], onClose: () => void): HTMLElement {
       item.appendChild(p);
     };
 
+    if (s.distKm != null) addLine(`현재 위치에서 약 ${fmtDist(s.distKm)}`);
     if (s.address) addLine(s.address);
     if (s.type) addLine(`구분: ${s.type}`);
     if (s.capacity != null) addLine(`수용 인원: ${s.capacity}명`);
@@ -140,6 +152,7 @@ function buildInfoContent(group: Shelter[], onClose: () => void): HTMLElement {
 
 export default function ShelterMap({ request = null }: { request?: MapRequest | null }) {
   const mapRef = useRef<HTMLDivElement>(null);
+  const mapObjRef = useRef<any>(null);
   const { loaded, error } = useNaverMapScript();
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<Record<Category, boolean>>(() => {
@@ -150,6 +163,9 @@ export default function ShelterMap({ request = null }: { request?: MapRequest | 
       TSUNAMI: only ? only.includes('TSUNAMI') : true,
     };
   });
+
+  const origin = request?.origin;
+  const nearest0 = origin ? request?.nearest?.[0] : undefined;
 
   // 지도 이벤트 안의 load()가 항상 최신 선택값을 읽도록 ref로 전달
   const selectedRef = useRef(selected);
@@ -165,20 +181,66 @@ export default function ShelterMap({ request = null }: { request?: MapRequest | 
     if (!loaded || !mapRef.current) return;
 
     const { naver } = window;
-    const center = request?.center;
+    const start = origin ?? request?.center;
     const map = new naver.maps.Map(mapRef.current, {
-      center: new naver.maps.LatLng(center?.lat ?? 37.4563, center?.lng ?? 126.7052),
-      zoom: center ? 13 : 14,
+      center: new naver.maps.LatLng(start?.lat ?? 37.4563, start?.lng ?? 126.7052),
+      zoom: origin ? 15 : start ? 13 : 14,
     });
+    mapObjRef.current = map;
     const infoWindow = new naver.maps.InfoWindow({ content: '' });
 
     let markers: any[] = [];
     let controller: AbortController | null = null;
+    const extraMarkers: any[] = []; // 현재 위치 / 가장 가까운 대피소 (조회로 지워지지 않는 마커)
 
     const clearMarkers = () => {
       markers.forEach((m) => m.setMap(null));
       markers = [];
     };
+
+    // 현재 위치 기준 표시: 내 위치, 가장 가까운 대피소 강조, 한 화면에 담기
+    if (origin) {
+      const here = new naver.maps.LatLng(origin.lat, origin.lng);
+      extraMarkers.push(
+        new naver.maps.Marker({
+          position: here,
+          map,
+          zIndex: 200,
+          icon: {
+            content:
+              '<div style="width:18px;height:18px;border-radius:50%;background:#2563EB;border:3px solid #fff;box-shadow:0 0 0 6px rgba(37,99,235,0.25);"></div>',
+            anchor: new naver.maps.Point(12, 12),
+          },
+        })
+      );
+
+      const list = request?.nearest ?? [];
+      if (list.length > 0) {
+        const first = list[0];
+        const color = infoOf(first.category).color;
+        const nearestMarker = new naver.maps.Marker({
+          position: new naver.maps.LatLng(first.lat, first.lng),
+          map,
+          zIndex: 150,
+          icon: {
+            content: `<div style="width:20px;height:20px;border-radius:50%;background:${color};border:3px solid #fff;box-shadow:0 0 0 4px #DC2626;"></div>`,
+            anchor: new naver.maps.Point(13, 13),
+          },
+        });
+        naver.maps.Event.addListener(nearestMarker, 'click', () => {
+          infoWindow.setContent(buildInfoContent([first], () => infoWindow.close()));
+          infoWindow.open(map, nearestMarker);
+        });
+        extraMarkers.push(nearestMarker);
+
+        // 2km 안의 가까운 대피소를 한 화면에 담고, 하나도 없으면 가장 가까운 1곳이 보이게 함
+        const near = list.filter((s) => (s.distKm ?? 0) <= FIT_RADIUS_KM).slice(0, FIT_COUNT);
+        const focus = near.length > 0 ? near : [first];
+        const bounds = new naver.maps.LatLngBounds(here, here);
+        focus.forEach((s) => bounds.extend(new naver.maps.LatLng(s.lat, s.lng)));
+        map.fitBounds(bounds, { top: 130, right: 40, bottom: 80, left: 40 });
+      }
+    }
 
     const load = async () => {
       const categories = CATEGORY_ORDER.filter((c) => selectedRef.current[c]);
@@ -248,11 +310,26 @@ export default function ShelterMap({ request = null }: { request?: MapRequest | 
       naver.maps.Event.removeListener(idleListener);
       naver.maps.Event.removeListener(clickListener);
       loadRef.current = null;
+      mapObjRef.current = null;
       controller?.abort();
       infoWindow.close();
       clearMarkers();
+      extraMarkers.forEach((m) => m.setMap(null));
     };
+    // 지도는 요청이 바뀌면 새로 만들어지므로(key) request는 의존성에 넣지 않음
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded]);
+
+  // '위치 보기': 내 위치와 가장 가까운 대피소가 함께 보이게 이동
+  const focusNearest = () => {
+    const map = mapObjRef.current;
+    if (!map || !origin || !nearest0) return;
+    const { naver } = window;
+    const here = new naver.maps.LatLng(origin.lat, origin.lng);
+    const bounds = new naver.maps.LatLngBounds(here, here);
+    bounds.extend(new naver.maps.LatLng(nearest0.lat, nearest0.lng));
+    map.fitBounds(bounds, { top: 130, right: 40, bottom: 80, left: 40 });
+  };
 
   if (error) {
     return <div style={{ color: 'red', padding: 16 }}>지도 로드 오류: {error}</div>;
@@ -320,6 +397,49 @@ export default function ShelterMap({ request = null }: { request?: MapRequest | 
           }}
         >
           {notice}
+        </div>
+      )}
+
+      {/* 가장 가까운 대피장소 / 위치 관련 안내 */}
+      {(nearest0 || request?.note) && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 100,
+            left: 10,
+            right: 10,
+            zIndex: 10,
+            background: 'rgba(255,255,255,0.97)',
+            borderRadius: 12,
+            padding: '8px 12px',
+            boxShadow: '0 1px 6px rgba(0,0,0,0.25)',
+            fontSize: 13,
+            lineHeight: 1.45,
+          }}
+        >
+          {nearest0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 11, color: '#6b7280' }}>
+                  가장 가까운 {infoOf(nearest0.category).label} 대피장소
+                </div>
+                <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {nearest0.name ?? '이름 없음'}
+                </div>
+                <div style={{ color: '#4b5563' }}>현재 위치에서 약 {fmtDist(nearest0.distKm)}</div>
+              </div>
+              <button
+                type="button"
+                onClick={focusNearest}
+                style={{ fontSize: 12, padding: '6px 10px', borderRadius: 8, border: '1px solid #d1d5db', background: '#fff', cursor: 'pointer' }}
+              >
+                위치 보기
+              </button>
+            </div>
+          )}
+          {request?.note && (
+            <div style={{ color: '#92400E', marginTop: nearest0 ? 6 : 0 }}>{request.note}</div>
+          )}
         </div>
       )}
     </div>
