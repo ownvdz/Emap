@@ -151,6 +151,51 @@ app.get('/api/map-center', async (req, res) => {
   }
 });
 
+app.get('/api/shelters/nearby', async (req, res) => {
+  const lat = Number(req.query.lat);
+  const lng = Number(req.query.lng);
+  const category = String(req.query.category ?? '').trim();
+  const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
+
+  const inKorea =
+    Number.isFinite(lat) && Number.isFinite(lng) && lat >= 33 && lat <= 39 && lng >= 124 && lng <= 132;
+  if (!inKorea || !CATEGORIES.includes(category)) {
+    return res.status(400).json({ error: '잘못된 요청입니다.' });
+  }
+
+  try {
+    const result = await query(
+      `SELECT SHELTER_ID, CATEGORY, NAME, SHELTER_TYPE, ROAD_ADDRESS, DETAIL_ADDRESS,
+              CAPACITY, AREA_SQM, LATITUDE, LONGITUDE,
+              SQRT(POWER((LATITUDE - :lat) * 111.0, 2)
+                 + POWER((LONGITUDE - :lng) * 111.0 * COS(:lat * 3.14159265358979 / 180), 2)) AS DIST_KM
+       FROM SHELTER
+       WHERE GEOCODE_STATUS = 'DONE' AND CATEGORY = :category
+       ORDER BY DIST_KM
+       FETCH FIRST :maxRows ROWS ONLY`,
+      { lat, lng, category, maxRows: limit }
+    );
+
+    res.json({
+      items: result.rows.map((r) => ({
+        id: r.SHELTER_ID,
+        category: r.CATEGORY,
+        name: decodeEntities(r.NAME),
+        type: decodeEntities(r.SHELTER_TYPE),
+        address: decodeEntities(r.ROAD_ADDRESS || r.DETAIL_ADDRESS),
+        capacity: r.CAPACITY,
+        area: r.AREA_SQM,
+        lat: r.LATITUDE,
+        lng: r.LONGITUDE,
+        distKm: Math.round(r.DIST_KM * 100) / 100,
+      })),
+    });
+  } catch (e) {
+    console.error('nearby error:', e.message);
+    res.status(500).json({ error: '가까운 대피소를 찾지 못했습니다.' });
+  }
+});
+
 initPool()
   .then(() => app.listen(PORT, () => console.log(`Server on :${PORT}`)))
   .catch((e) => {
