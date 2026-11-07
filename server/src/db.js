@@ -27,3 +27,12 @@ export async function query(sql, binds = [], options = {}) {
     await conn.close();
   }
 }
+
+export async function queryMany(sql, binds, options = {}) {
+  const conn = await pool.getConnection();
+  try {
+    return await conn.executeMany(sql, binds, options);
+  } finally {
+    await conn.close();
+  }
+}
