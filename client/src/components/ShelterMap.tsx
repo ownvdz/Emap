@@ -1,22 +1,53 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNaverMapScript } from '../hooks/useNaverMapScript';
 
-export type Category = 'CIVIL_DEFENSE' | 'EARTHQUAKE' | 'TSUNAMI';
+export type Category =
+  | 'CIVIL_DEFENSE'
+  | 'EARTHQUAKE_OUTDOOR'
+  | 'EARTHQUAKE_INDOOR'
+  | 'TSUNAMI'
+  | 'HEAT_SHELTER'
+  | 'COLD_SHELTER';
 
-const CATEGORY_ORDER: Category[] = ['CIVIL_DEFENSE', 'EARTHQUAKE', 'TSUNAMI'];
+const CATEGORY_ORDER: Category[] = [
+  'CIVIL_DEFENSE',
+  'EARTHQUAKE_OUTDOOR',
+  'EARTHQUAKE_INDOOR',
+  'TSUNAMI',
+  'HEAT_SHELTER',
+  'COLD_SHELTER',
+];
 
 const CATEGORY_INFO: Record<Category, { label: string; color: string }> = {
   CIVIL_DEFENSE: { label: '민방위', color: '#2563EB' },
-  EARTHQUAKE: { label: '지진', color: '#F97316' },
+  EARTHQUAKE_OUTDOOR: { label: '지진 옥외', color: '#F97316' },
+  EARTHQUAKE_INDOOR: { label: '지진 실내', color: '#B45309' },
   TSUNAMI: { label: '해일', color: '#10B981' },
+  HEAT_SHELTER: { label: '무더위', color: '#EC4899' },
+  COLD_SHELTER: { label: '한파', color: '#06B6D4' },
+};
+
+// 처음 지도를 열 때 켜둘 종류 (실내구호소와 쉼터는 마커가 많아서 기본으로 끔)
+const DEFAULT_SELECTED: Record<Category, boolean> = {
+  CIVIL_DEFENSE: true,
+  EARTHQUAKE_OUTDOOR: true,
+  EARTHQUAKE_INDOOR: false,
+  TSUNAMI: true,
+  HEAT_SHELTER: false,
+  COLD_SHELTER: false,
 };
 
 const FALLBACK_INFO = { label: '기타', color: '#6B7280' };
-const MIXED_COLOR = '#374151'; // 종류가 섞인 묶음 마커 색
+const MIXED_COLOR = '#374151'; // 종류가 섞인 마커 색
+
+// 마커가 매우 많은 종류: 더 확대해야 불러옴
+const DENSE_CATEGORIES: Category[] = ['HEAT_SHELTER', 'COLD_SHELTER'];
+const isDense = (c: Category) => DENSE_CATEGORIES.includes(c);
 
 interface Shelter {
   id: number;
   category: Category;
+  categories?: Category[]; // 같은 시설이 여러 종류일 때(한파·무더위 겸용 등) 화면에서 합쳐 채움
   name: string | null;
   type: string | null;
   address: string | null;
@@ -37,14 +68,35 @@ export interface MapRequest {
 }
 
 const MIN_ZOOM_TO_LOAD = 13;
+const MIN_ZOOM_DENSE = 15;
 const FIT_RADIUS_KM = 2;  // 이 거리 안의 대피소를 한 화면에 담음
 const FIT_COUNT = 50;     // 한 화면에 담을 최대 개수
+const FIT_MARGIN = { top: 190, right: 40, bottom: 80, left: 40 };
 
 const infoOf = (c: Category) => CATEGORY_INFO[c] ?? FALLBACK_INFO;
+const catsOf = (s: Shelter): Category[] => s.categories ?? [s.category];
 
 function fmtDist(km?: number): string {
   if (km == null) return '';
   return km < 1 ? `${Math.round(km * 1000)}m` : `${km.toFixed(1)}km`;
+}
+
+// 같은 위치에서 이름이 같고 종류만 다른 항목(한파·무더위 겸용 시설 등)을 한 시설로 합침
+function mergeSameFacility(list: Shelter[]): Shelter[] {
+  const byName = new Map<string, Shelter>();
+  const result: Shelter[] = [];
+  for (const s of list) {
+    const key = (s.name ?? '').trim();
+    const existing = key ? byName.get(key) : undefined;
+    if (existing && !catsOf(existing).includes(s.category)) {
+      existing.categories = [...catsOf(existing), s.category];
+    } else {
+      const copy: Shelter = { ...s, categories: [s.category] };
+      if (key && !existing) byName.set(key, copy);
+      result.push(copy);
+    }
+  }
+  return result;
 }
 
 // 같은 위치(소수점 5자리, 약 1m)의 대피소를 한 묶음으로 만듦
@@ -56,27 +108,28 @@ function groupByLocation(items: Shelter[]): Shelter[][] {
     if (list) list.push(s);
     else map.set(key, [s]);
   }
-  const groups = [...map.values()];
-  groups.forEach((g) =>
-    g.sort((a, b) => CATEGORY_ORDER.indexOf(a.category) - CATEGORY_ORDER.indexOf(b.category))
-  );
-  return groups;
+  return [...map.values()].map((list) => {
+    const merged = mergeSameFacility(list);
+    merged.sort(
+      (a, b) => CATEGORY_ORDER.indexOf(catsOf(a)[0]) - CATEGORY_ORDER.indexOf(catsOf(b)[0])
+    );
+    return merged;
+  });
 }
 
-// 마커 모양: 1곳이면 색 점, 여러 곳이면 개수가 적힌 원
+// 마커 모양: 1곳이면 색 점, 여러 곳이면 개수가 적힌 원 (종류가 섞이면 회색)
 function buildMarkerIcon(group: Shelter[]): { content: string; size: number } {
+  const cats = new Set(group.flatMap(catsOf));
+  const color = cats.size === 1 ? infoOf([...cats][0]).color : MIXED_COLOR;
+
   if (group.length === 1) {
-    const color = infoOf(group[0].category).color;
     return {
       content: `<div style="width:14px;height:14px;border-radius:50%;background:${color};border:2px solid #fff;box-shadow:0 0 3px rgba(0,0,0,0.5);"></div>`,
       size: 18,
     };
   }
 
-  const sameCategory = new Set(group.map((s) => s.category)).size === 1;
-  const color = sameCategory ? infoOf(group[0].category).color : MIXED_COLOR;
   const label = group.length > 99 ? '99+' : String(group.length);
-
   return {
     content: `<div style="min-width:22px;height:22px;padding:0 4px;box-sizing:border-box;border-radius:11px;background:${color};color:#fff;border:2px solid #fff;box-shadow:0 0 3px rgba(0,0,0,0.5);font-size:11px;font-weight:600;line-height:18px;text-align:center;">${label}</div>`,
     size: 26,
@@ -115,19 +168,21 @@ function buildInfoContent(group: Shelter[], onClose: () => void): HTMLElement {
   }
 
   group.forEach((s, i) => {
-    const info = infoOf(s.category);
     const item = document.createElement('div');
     if (i > 0) {
       item.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid #e5e7eb;';
     }
 
     const titleRow = document.createElement('div');
-    const badge = document.createElement('span');
-    badge.textContent = info.label;
-    badge.style.cssText = `display:inline-block;margin-right:6px;padding:1px 6px;border-radius:8px;font-size:11px;color:#fff;background:${info.color};`;
+    catsOf(s).forEach((c) => {
+      const info = infoOf(c);
+      const badge = document.createElement('span');
+      badge.textContent = info.label;
+      badge.style.cssText = `display:inline-block;margin-right:4px;padding:1px 6px;border-radius:8px;font-size:11px;color:#fff;background:${info.color};`;
+      titleRow.appendChild(badge);
+    });
     const title = document.createElement('strong');
     title.textContent = s.name ?? '이름 없음';
-    titleRow.appendChild(badge);
     titleRow.appendChild(title);
     item.appendChild(titleRow);
 
@@ -157,11 +212,8 @@ export default function ShelterMap({ request = null }: { request?: MapRequest | 
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<Record<Category, boolean>>(() => {
     const only = request?.categories;
-    return {
-      CIVIL_DEFENSE: only ? only.includes('CIVIL_DEFENSE') : true,
-      EARTHQUAKE: only ? only.includes('EARTHQUAKE') : true,
-      TSUNAMI: only ? only.includes('TSUNAMI') : true,
-    };
+    if (!only) return { ...DEFAULT_SELECTED };
+    return Object.fromEntries(CATEGORY_ORDER.map((c) => [c, only.includes(c)])) as Record<Category, boolean>;
   });
 
   const origin = request?.origin;
@@ -238,7 +290,7 @@ export default function ShelterMap({ request = null }: { request?: MapRequest | 
         const focus = near.length > 0 ? near : [first];
         const bounds = new naver.maps.LatLngBounds(here, here);
         focus.forEach((s) => bounds.extend(new naver.maps.LatLng(s.lat, s.lng)));
-        map.fitBounds(bounds, { top: 130, right: 40, bottom: 80, left: 40 });
+        map.fitBounds(bounds, FIT_MARGIN);
       }
     }
 
@@ -252,10 +304,19 @@ export default function ShelterMap({ request = null }: { request?: MapRequest | 
         return;
       }
 
-      if (map.getZoom() < MIN_ZOOM_TO_LOAD) {
+      // 쉼터는 더 확대해야 불러오고, 나머지는 기존 배율부터 불러옴
+      const zoom = map.getZoom();
+      const loadable = categories.filter((c) => zoom >= (isDense(c) ? MIN_ZOOM_DENSE : MIN_ZOOM_TO_LOAD));
+      const hiddenDense = categories.some((c) => isDense(c) && zoom < MIN_ZOOM_DENSE);
+
+      if (loadable.length === 0) {
         controller?.abort();
         clearMarkers();
-        setNotice('지도를 더 확대하면 대피소가 표시됩니다.');
+        setNotice(
+          categories.every(isDense)
+            ? '쉼터는 지도를 더 확대해야 표시됩니다.'
+            : '지도를 더 확대하면 대피소가 표시됩니다.'
+        );
         return;
       }
 
@@ -272,7 +333,7 @@ export default function ShelterMap({ request = null }: { request?: MapRequest | 
           swLng: String(sw.lng()),
           neLat: String(ne.lat()),
           neLng: String(ne.lng()),
-          categories: categories.join(','),
+          categories: loadable.join(','),
         });
         const res = await fetch(`/api/shelters?${params}`, { signal: controller.signal });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -293,7 +354,13 @@ export default function ShelterMap({ request = null }: { request?: MapRequest | 
           return marker;
         });
 
-        setNotice(data.truncated ? '대피소가 많아 일부만 표시 중입니다. 더 확대해주세요.' : null);
+        setNotice(
+          data.truncated
+            ? '대피소가 많아 일부만 표시 중입니다. 더 확대해주세요.'
+            : hiddenDense
+              ? '쉼터는 지도를 더 확대하면 표시됩니다.'
+              : null
+        );
       } catch (e) {
         if ((e as Error).name !== 'AbortError') {
           setNotice('대피소 정보를 불러오지 못했습니다.');
@@ -328,7 +395,7 @@ export default function ShelterMap({ request = null }: { request?: MapRequest | 
     const here = new naver.maps.LatLng(origin.lat, origin.lng);
     const bounds = new naver.maps.LatLngBounds(here, here);
     bounds.extend(new naver.maps.LatLng(nearest0.lat, nearest0.lng));
-    map.fitBounds(bounds, { top: 130, right: 40, bottom: 80, left: 40 });
+    map.fitBounds(bounds, FIT_MARGIN);
   };
 
   if (error) {
@@ -339,7 +406,7 @@ export default function ShelterMap({ request = null }: { request?: MapRequest | 
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
       <div ref={mapRef} style={{ width: '100%', height: '100%' }} />
 
-      {/* 표시할 대피소 종류 선택 (범례 겸용) */}
+      {/* 위쪽 안내 영역: 종류 선택 → 알림 → 가까운 대피장소를 세로로 쌓아 서로 겹치지 않게 함 */}
       <div
         style={{
           position: 'absolute',
@@ -348,100 +415,103 @@ export default function ShelterMap({ request = null }: { request?: MapRequest | 
           right: 10,
           zIndex: 10,
           display: 'flex',
-          justifyContent: 'center',
-          gap: 14,
-          background: 'rgba(255,255,255,0.95)',
-          padding: '8px 12px',
-          borderRadius: 12,
-          boxShadow: '0 1px 6px rgba(0,0,0,0.25)',
+          flexDirection: 'column',
+          gap: 8,
+          pointerEvents: 'none',
         }}
       >
-        {CATEGORY_ORDER.map((c) => (
-          <label
-            key={c}
-            style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 13, cursor: 'pointer' }}
-          >
-            <input
-              type="checkbox"
-              checked={selected[c]}
-              onChange={() => setSelected((prev) => ({ ...prev, [c]: !prev[c] }))}
-            />
-            <span
-              style={{
-                width: 10,
-                height: 10,
-                borderRadius: '50%',
-                background: CATEGORY_INFO[c].color,
-                display: 'inline-block',
-              }}
-            />
-            {CATEGORY_INFO[c].label}
-          </label>
-        ))}
-      </div>
-
-      {notice && (
         <div
           style={{
-            position: 'absolute',
-            top: 58,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            background: 'rgba(0,0,0,0.75)',
-            color: '#fff',
-            padding: '8px 14px',
-            borderRadius: 20,
-            fontSize: 13,
-            zIndex: 10,
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {notice}
-        </div>
-      )}
-
-      {/* 가장 가까운 대피장소 / 위치 관련 안내 */}
-      {(nearest0 || request?.note) && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 100,
-            left: 10,
-            right: 10,
-            zIndex: 10,
-            background: 'rgba(255,255,255,0.97)',
-            borderRadius: 12,
+            pointerEvents: 'auto',
+            display: 'flex',
+            flexWrap: 'wrap',
+            justifyContent: 'center',
+            gap: '6px 12px',
+            background: 'rgba(255,255,255,0.95)',
             padding: '8px 12px',
+            borderRadius: 12,
             boxShadow: '0 1px 6px rgba(0,0,0,0.25)',
-            fontSize: 13,
-            lineHeight: 1.45,
           }}
         >
-          {nearest0 && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 11, color: '#6b7280' }}>
-                  가장 가까운 {infoOf(nearest0.category).label} 대피장소
-                </div>
-                <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {nearest0.name ?? '이름 없음'}
-                </div>
-                <div style={{ color: '#4b5563' }}>현재 위치에서 약 {fmtDist(nearest0.distKm)}</div>
-              </div>
-              <button
-                type="button"
-                onClick={focusNearest}
-                style={{ fontSize: 12, padding: '6px 10px', borderRadius: 8, border: '1px solid #d1d5db', background: '#fff', cursor: 'pointer' }}
-              >
-                위치 보기
-              </button>
-            </div>
-          )}
-          {request?.note && (
-            <div style={{ color: '#92400E', marginTop: nearest0 ? 6 : 0 }}>{request.note}</div>
-          )}
+          {CATEGORY_ORDER.map((c) => (
+            <label
+              key={c}
+              style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12.5, cursor: 'pointer' }}
+            >
+              <input
+                type="checkbox"
+                checked={selected[c]}
+                onChange={() => setSelected((prev) => ({ ...prev, [c]: !prev[c] }))}
+              />
+              <span
+                style={{
+                  width: 10,
+                  height: 10,
+                  borderRadius: '50%',
+                  background: CATEGORY_INFO[c].color,
+                  display: 'inline-block',
+                }}
+              />
+              {CATEGORY_INFO[c].label}
+            </label>
+          ))}
         </div>
-      )}
+
+        {notice && (
+          <div
+            style={{
+              pointerEvents: 'auto',
+              alignSelf: 'center',
+              background: 'rgba(0,0,0,0.75)',
+              color: '#fff',
+              padding: '8px 14px',
+              borderRadius: 20,
+              fontSize: 13,
+            }}
+          >
+            {notice}
+          </div>
+        )}
+
+        {/* 가장 가까운 대피장소 / 위치 관련 안내 */}
+        {(nearest0 || request?.note) && (
+          <div
+            style={{
+              pointerEvents: 'auto',
+              background: 'rgba(255,255,255,0.97)',
+              borderRadius: 12,
+              padding: '8px 12px',
+              boxShadow: '0 1px 6px rgba(0,0,0,0.25)',
+              fontSize: 13,
+              lineHeight: 1.45,
+            }}
+          >
+            {nearest0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 11, color: '#6b7280' }}>
+                    가장 가까운 {infoOf(nearest0.category).label} 대피장소
+                  </div>
+                  <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {nearest0.name ?? '이름 없음'}
+                  </div>
+                  <div style={{ color: '#4b5563' }}>현재 위치에서 약 {fmtDist(nearest0.distKm)}</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={focusNearest}
+                  style={{ fontSize: 12, padding: '6px 10px', borderRadius: 8, border: '1px solid #d1d5db', background: '#fff', cursor: 'pointer' }}
+                >
+                  위치 보기
+                </button>
+              </div>
+            )}
+            {request?.note && (
+              <div style={{ color: '#92400E', marginTop: nearest0 ? 6 : 0 }}>{request.note}</div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

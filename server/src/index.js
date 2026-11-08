@@ -26,7 +26,10 @@ app.get('/api/db-check', async (req, res) => {
   }
 });
 
-const CATEGORIES = ['CIVIL_DEFENSE', 'EARTHQUAKE', 'TSUNAMI'];
+const CATEGORIES = [
+  'CIVIL_DEFENSE', 'EARTHQUAKE_OUTDOOR', 'EARTHQUAKE_INDOOR',
+  'TSUNAMI', 'HEAT_SHELTER', 'COLD_SHELTER',
+];
 
 app.get('/api/shelters', async (req, res) => {
   const swLat = Number(req.query.swLat);

@@ -1,10 +1,14 @@
 import type { Category } from '../components/ShelterMap';
 
+export interface ShelterLink {
+  category: Category;
+  label: string;
+}
+
 export interface Guidance {
   title: string;
   steps: string[];
-  shelterCategory?: Category;
-  shelterLabel?: string;   // 대피장소 버튼에 쓸 이름
+  shelters?: ShelterLink[];
   note?: string;
   sourceLabel: string;
   sourceUrl: string;
@@ -12,6 +16,18 @@ export interface Guidance {
 
 const SOURCE_LABEL = '행정안전부 국민행동요령 (국민재난안전포털)';
 const SOURCE_URL = 'https://www.safekorea.go.kr';
+
+// 대응하는 행동요령이 없는 재난에 쓰는 기본 안내
+export const GENERIC_GUIDANCE: Guidance = {
+  title: '재난문자 안내',
+  steps: [
+    '문자에 적힌 안내와 지시를 먼저 따르세요.',
+    '라디오·TV, 공공기관의 안내방송 등 공식 정보를 계속 확인하세요.',
+    '재난 종류별 행동요령은 아래 공식 안내에서 확인할 수 있습니다.',
+  ],
+  sourceLabel: SOURCE_LABEL,
+  sourceUrl: SOURCE_URL,
+};
 
 // 공식 국민행동요령을 요약한 것입니다. 사용 전 국민재난안전포털의 원문과 반드시 대조하세요.
 export const GUIDANCE: Record<string, Guidance> = {
@@ -25,9 +41,11 @@ export const GUIDANCE: Record<string, Guidance> = {
       '대피한 뒤에는 라디오나 공공기관의 안내방송 등 확인된 정보에 따라 행동하세요. 근거 없는 소문은 믿지 마세요.',
       '해안에 있을 때 지진해일 특보가 발령되면 높은 곳으로 이동하세요.',
     ],
-    shelterCategory: 'EARTHQUAKE',
-    shelterLabel: '지진 실내구호소 보기',
-    note: '지진 실내구호소는 대피한 뒤 임시로 머무르는 시설입니다. 먼저 넓은 곳으로 안전하게 대피하세요.',
+    shelters: [
+      { category: 'EARTHQUAKE_OUTDOOR', label: '지진 옥외대피장소 보기' },
+      { category: 'EARTHQUAKE_INDOOR', label: '지진 실내구호소 보기 (대피 후 머무를 곳)' },
+    ],
+    note: '옥외대피장소는 흔들림이 멈춘 뒤 먼저 이동할 넓은 공간이고, 실내구호소는 대피한 뒤 임시로 머무르는 시설입니다.',
     sourceLabel: SOURCE_LABEL,
     sourceUrl: SOURCE_URL,
   },
@@ -41,8 +59,7 @@ export const GUIDANCE: Record<string, Guidance> = {
       '해안에 가까울수록 위험합니다. 해안에서 멀고 급경사가 없는 높은 지대로 이동하세요.',
       '라디오·TV, 공공기관의 안내방송 등 공식 정보를 계속 확인하세요.',
     ],
-    shelterCategory: 'TSUNAMI',
-    shelterLabel: '지진해일 긴급대피장소 보기',
+    shelters: [{ category: 'TSUNAMI', label: '지진해일 긴급대피장소 보기' }],
     sourceLabel: SOURCE_LABEL,
     sourceUrl: SOURCE_URL,
   },
@@ -58,21 +75,20 @@ export const GUIDANCE: Record<string, Guidance> = {
       '대피한 뒤에는 라디오·TV 등 정부 방송을 계속 들으며 안내에 따라 행동하세요.',
       '화생방·핵 경보는 행동요령이 다릅니다. 아래 공식 안내를 반드시 확인하세요.',
     ],
-    shelterCategory: 'CIVIL_DEFENSE',
-    shelterLabel: '민방위대피소 보기',
+    shelters: [{ category: 'CIVIL_DEFENSE', label: '민방위대피소 보기' }],
     sourceLabel: SOURCE_LABEL,
     sourceUrl: SOURCE_URL,
   },
-};
 
-// 대응하는 행동요령이 없는 재난(호우, 태풍 등)에 쓰는 기본 안내
-export const GENERIC_GUIDANCE: Guidance = {
-  title: '재난문자 안내',
-  steps: [
-    '문자에 적힌 안내와 지시를 먼저 따르세요.',
-    '라디오·TV, 공공기관의 안내방송 등 공식 정보를 계속 확인하세요.',
-    '재난 종류별 행동요령은 아래 공식 안내에서 확인할 수 있습니다.',
-  ],
-  sourceLabel: SOURCE_LABEL,
-  sourceUrl: SOURCE_URL,
+  // 폭염·한파: 기본 안내에 쉼터 버튼만 연결 (행동요령 문구는 공식 자료 확인 후 추가)
+  폭염: {
+    ...GENERIC_GUIDANCE,
+    title: '폭염 관련 재난문자',
+    shelters: [{ category: 'HEAT_SHELTER', label: '무더위쉼터 보기' }],
+  },
+  한파: {
+    ...GENERIC_GUIDANCE,
+    title: '한파 관련 재난문자',
+    shelters: [{ category: 'COLD_SHELTER', label: '한파쉼터 보기' }],
+  },
 };
