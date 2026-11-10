@@ -18,6 +18,9 @@ import { catsOf, groupByLocation, type Shelter } from '../core/shelters';
 
 const MAX_MARKERS = 300;
 
+// 임시: true면 라이브러리 기본 마커로 표시 (커스텀 마커 문제 구분용)
+const DEBUG_PLAIN_MARKERS = false;
+
 type Bounds = { swLat: number; swLng: number; neLat: number; neLng: number };
 
 // 카메라 정지 이벤트에서 화면 영역을 계산한다.
@@ -55,15 +58,26 @@ function boundsFromEvent(e: any): Bounds | null {
   };
 }
 
+// 마커 크기: 라이브러리가 마커의 width/height를 직접 지정해야 그려진다.
+// 아래 MarkerView 안의 View 크기와 반드시 같아야 한다.
+function markerSize(group: Shelter[]): { width: number; height: number } {
+  if (group.length === 1) {
+    return { width: 16, height: 16 };
+  }
+  const width = group.length > 99 ? 36 : group.length > 9 ? 30 : 24;
+  return { width, height: 24 };
+}
+
 // 지도 위에 그려질 마커 모양: 1곳이면 색 점, 여러 곳이면 개수가 적힌 원 (종류가 섞이면 회색)
 function MarkerView({ group }: { group: Shelter[] }) {
+  const { width, height } = markerSize(group);
   const cats = new Set(group.flatMap(catsOf));
   const color = cats.size === 1 ? infoOf([...cats][0]).color : MIXED_COLOR;
   if (group.length === 1) {
-    return <View style={[styles.dot, { backgroundColor: color }]} />;
+    return <View style={[styles.dot, { width, height, backgroundColor: color }]} />;
   }
   return (
-    <View style={[styles.count, { backgroundColor: color }]}>
+    <View style={[styles.count, { width, height, backgroundColor: color }]}>
       <Text style={styles.countText}>{group.length > 99 ? '99+' : group.length}</Text>
     </View>
   );
@@ -75,6 +89,7 @@ export default function MapScreen() {
   const [groups, setGroups] = useState<Shelter[][]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [openGroup, setOpenGroup] = useState<Shelter[] | null>(null);
+  const [debug, setDebug] = useState('시작');
 
   const selectedRef = useRef(selected);
   const camRef = useRef<{ bounds: Bounds; zoom: number } | null>(null);
@@ -91,6 +106,7 @@ export default function MapScreen() {
     if (categories.length === 0) {
       abortRef.current?.abort();
       setGroups([]);
+      setDebug('조회 안 함 (선택한 종류 없음)');
       setNotice('표시할 항목을 선택해주세요.');
       return;
     }
@@ -104,6 +120,7 @@ export default function MapScreen() {
     if (loadable.length === 0) {
       abortRef.current?.abort();
       setGroups([]);
+      setDebug(`조회 안 함 (배율 ${cam.zoom})`);
       setNotice(
         categories.every(isDense)
           ? '쉼터는 지도를 더 확대해야 표시됩니다.'
@@ -118,6 +135,7 @@ export default function MapScreen() {
     const myReq = ++reqRef.current;
 
     try {
+      setDebug(`요청 중 (${loadable.length}종, 배율 ${cam.zoom})`);
       const { bounds } = cam;
       const data = await apiGet<{ items: Shelter[]; truncated: boolean }>(
         '/api/shelters',
@@ -134,7 +152,9 @@ export default function MapScreen() {
       if (myReq !== reqRef.current) {
         return; // 그 사이에 더 새로운 요청이 시작됨
       }
-      setGroups(groupByLocation(data.items));
+      const next = groupByLocation(data.items);
+      setDebug(`응답 ${data.items.length}건 → 마커 ${next.length}개`);
+      setGroups(next);
       setNotice(
         data.truncated
           ? '대피소가 많아 일부만 표시 중입니다. 더 확대해주세요.'
@@ -146,6 +166,7 @@ export default function MapScreen() {
       if (myReq !== reqRef.current || (e as Error).name === 'AbortError') {
         return;
       }
+      setDebug(`오류: ${(e as Error).message}`);
       setNotice(`대피소 정보를 불러오지 못했습니다. (${(e as Error).message})`);
     }
   }, []);
@@ -160,12 +181,13 @@ export default function MapScreen() {
     (e: any) => {
       const bounds = boundsFromEvent(e);
       if (!bounds) {
-        console.log('화면 영역을 읽지 못했습니다:', JSON.stringify(e));
+        const raw = JSON.stringify(e);
+        console.log('화면 영역을 읽지 못했습니다:', raw);
+        setDebug(`영역을 못 읽음: ${raw.slice(0, 160)}`);
         return;
       }
-      if (__DEV__) {
-        console.log('범위', JSON.stringify(bounds), '배율', e.zoom);
-      }
+      console.log('범위', JSON.stringify(bounds), '배율', e.zoom);
+      setDebug(`카메라 정지 (배율 ${e.zoom})`);
       camRef.current = { bounds, zoom: Number(e.zoom) };
       load();
     },
@@ -179,16 +201,21 @@ export default function MapScreen() {
         initialCamera={{ latitude: 37.4563, longitude: 126.7052, zoom: 14 }}
         onCameraIdle={handleIdle}
         onTapMap={() => setOpenGroup(null)}>
-        {groups.map(g => (
-          <NaverMapMarkerOverlay
-            key={`${g[0].lat.toFixed(5)},${g[0].lng.toFixed(5)}`}
-            latitude={g[0].lat}
-            longitude={g[0].lng}
-            anchor={{ x: 0.5, y: 0.5 }}
-            onTap={() => setOpenGroup(g)}>
-            <MarkerView group={g} />
-          </NaverMapMarkerOverlay>
-        ))}
+        {groups.map(g => {
+          const size = markerSize(g);
+          return (
+            <NaverMapMarkerOverlay
+              key={`${g[0].lat.toFixed(5)},${g[0].lng.toFixed(5)}`}
+              latitude={g[0].lat}
+              longitude={g[0].lng}
+              width={size.width}
+              height={size.height}
+              anchor={{ x: 0.5, y: 0.5 }}
+              onTap={() => setOpenGroup(g)}>
+              {DEBUG_PLAIN_MARKERS ? null : <MarkerView group={g} />}
+            </NaverMapMarkerOverlay>
+          );
+        })}
       </NaverMapView>
 
       {/* 위쪽: 종류 칩과 안내 */}
@@ -243,6 +270,9 @@ export default function MapScreen() {
           </ScrollView>
         </View>
       ) : null}
+
+      {/* 임시 진단 문구 (정상 확인 후 지웁니다) */}
+      <Text style={styles.debug}>{debug}</Text>
     </View>
   );
 }
@@ -279,16 +309,11 @@ const styles = StyleSheet.create({
   },
   noticeText: { color: '#fff', fontSize: 13 },
   dot: {
-    width: 16,
-    height: 16,
     borderRadius: 8,
     borderWidth: 2,
     borderColor: '#fff',
   },
   count: {
-    minWidth: 24,
-    height: 24,
-    paddingHorizontal: 4,
     borderRadius: 12,
     borderWidth: 2,
     borderColor: '#fff',
@@ -300,14 +325,23 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 10,
     right: 10,
-    bottom: 12,
+    bottom: 40,
     backgroundColor: '#fff',
     borderRadius: 14,
     padding: 12,
     elevation: 6,
   },
   cardScroll: { maxHeight: 220 },
-  close: { position: 'absolute', top: 6, right: 6, width: 32, height: 32, alignItems: 'center', justifyContent: 'center', zIndex: 1 },
+  close: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1,
+  },
   closeText: { fontSize: 16, color: '#6b7280' },
   cardHead: { fontWeight: '700', marginBottom: 8, paddingRight: 28, color: '#111' },
   item: { paddingRight: 28 },
@@ -317,4 +351,14 @@ const styles = StyleSheet.create({
   badgeText: { color: '#fff', fontSize: 11 },
   name: { fontWeight: '700', color: '#111', fontSize: 14 },
   line: { fontSize: 13, color: '#374151', marginTop: 2 },
+  debug: {
+    position: 'absolute',
+    left: 8,
+    right: 8,
+    bottom: 8,
+    backgroundColor: 'rgba(255,255,0,0.9)',
+    padding: 4,
+    fontSize: 11,
+    color: '#000',
+  },
 });
