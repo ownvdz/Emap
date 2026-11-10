@@ -110,6 +110,7 @@ function BleChat() {
   const linkPeer = useRef(new Map<string, string>()); // 내가 연 링크(BLE 주소) -> 상대 앱 ID
   const lineKey = useRef(0);
   const scanSeen = useRef(new Set<string>());
+  const connectChain = useRef<Promise<void>>(Promise.resolve());
   const scrollRef = useRef<ScrollView | null>(null);
 
   const [status, setStatus] = useState('시작 중...');
@@ -327,13 +328,16 @@ function BleChat() {
         );
 
         // 발견한 기기에 자동 연결 (서비스 UUID 또는 이름 BT-로 상대 판별)
+                // 발견한 기기에 자동 연결 (서비스 UUID 또는 이름 BT-로 상대 판별)
         listen('deviceFound', async d => {
           const id: string = d.id;
           const name = String(d.localName ?? d.name ?? '');
+
           if (!scanSeen.current.has(id) && scanSeen.current.size < 20) {
             scanSeen.current.add(id);
             log(`스캔: ${name || '(이름없음)'} ${id.slice(-5)}`);
           }
+
           const isPeer =
             JSON.stringify(d).toLowerCase().includes('71f271d0') ||
             name.startsWith('BT-');
@@ -348,21 +352,30 @@ function BleChat() {
           }
           log(`상대 발견: ${name || '(이름없음)'} ${id.slice(-5)}`);
           connecting.current.add(id);
-          try {
-            await connect(id);
+
+          // 연결 작업은 한 번에 하나씩만 진행 (동시에 여러 기기에 연결하면 시간 초과가 나기 쉬움)
+          connectChain.current = connectChain.current.then(async () => {
             try {
-              await requestMTU(id, 185);
-            } catch {}
-            await discoverServices(id);
-            subscribeToCharacteristic(id, SERVICE_UUID, CHAR_UUID);
-            peers.current.add(id);
-            setLinkCount(peers.current.size);
-            log(`연결됨: ${name || id.slice(-5)}`);
-          } catch (err: any) {
-            log(`연결 실패(${id.slice(-5)}): ${err?.message ?? err}`);
-          } finally {
-            connecting.current.delete(id);
-          }
+              await connect(id);
+              try {
+                await requestMTU(id, 185);
+              } catch {}
+              await discoverServices(id);
+              peers.current.add(id);
+              setLinkCount(peers.current.size);
+              log(`연결됨: ${name || id.slice(-5)}`);
+              try {
+                await subscribeToCharacteristic(id, SERVICE_UUID, CHAR_UUID);
+              } catch (err: any) {
+                // 알림 구독이 실패해도 쓰기(write) 경로로는 통신할 수 있음
+                log(`알림 구독 실패(${id.slice(-5)}): ${err?.message ?? err}`);
+              }
+            } catch (err: any) {
+              log(`연결 실패(${id.slice(-5)}): ${err?.message ?? err}`);
+            } finally {
+              connecting.current.delete(id);
+            }
+          });
         });
 
         startAdvertising({
