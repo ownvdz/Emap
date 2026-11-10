@@ -5,7 +5,7 @@ import { defineConfig } from 'vite'
 export default defineConfig({
   plugins: [react()],
     server: {
-    allowedHosts: ['ownvdz.duckdns.org'],
+    allowedHosts: ['ownvdz.duckdns.org', 'emap-ownvdz.duckdns.org'],
     proxy: {
       '/api': 'http://localhost:4000',
     },
