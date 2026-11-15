@@ -154,6 +154,9 @@ app.get('/api/map-center', async (req, res) => {
   }
 });
 
+// 가까운 대피소 탐색 반경(km). 마지막 값까지 못 채우면 그 반경의 결과를 그대로 돌려준다.
+const NEARBY_RADII_KM = [3, 10, 30, 100, 400];
+
 app.get('/api/shelters/nearby', async (req, res) => {
   const lat = Number(req.query.lat);
   const lng = Number(req.query.lng);
@@ -167,17 +170,41 @@ app.get('/api/shelters/nearby', async (req, res) => {
   }
 
   try {
-    const result = await query(
-      `SELECT SHELTER_ID, CATEGORY, NAME, SHELTER_TYPE, ROAD_ADDRESS, DETAIL_ADDRESS,
+    // 전체 행의 거리를 계산하지 않도록, 내 위치 주변 사각형으로 먼저 거른다 (IDX_SHELTER_CAT_LAT_LNG 인덱스 사용).
+    // 반경을 3km부터 늘려가며, 반경 안에서 limit개를 채우면 멈춘다.
+    // 반경 r(km)의 원은 한 변 2r인 사각형 안에 완전히 들어가므로, 원 안의 결과만 세면 정확한 최근접 순서가 보장된다.
+    const cosLat = Math.cos((lat * Math.PI) / 180);
+    const sqlBase = `SELECT SHELTER_ID, CATEGORY, NAME, SHELTER_TYPE, ROAD_ADDRESS, DETAIL_ADDRESS,
               CAPACITY, AREA_SQM, LATITUDE, LONGITUDE,
               SQRT(POWER((LATITUDE - :lat) * 111.0, 2)
                  + POWER((LONGITUDE - :lng) * 111.0 * COS(:lat * 3.14159265358979 / 180), 2)) AS DIST_KM
        FROM SHELTER
-       WHERE GEOCODE_STATUS = 'DONE' AND CATEGORY = :category
-       ORDER BY DIST_KM
-       FETCH FIRST :maxRows ROWS ONLY`,
-      { lat, lng, category, maxRows: limit }
-    );
+       WHERE GEOCODE_STATUS = 'DONE' AND CATEGORY = :category`;
+
+    let rows = [];
+    for (const radiusKm of NEARBY_RADII_KM) {
+      const dLat = radiusKm / 111.0;
+      const dLng = radiusKm / (111.0 * cosLat);
+      const result = await query(
+        `${sqlBase}
+           AND LATITUDE BETWEEN :minLat AND :maxLat
+           AND LONGITUDE BETWEEN :minLng AND :maxLng
+         ORDER BY DIST_KM
+         FETCH FIRST :maxRows ROWS ONLY`,
+        {
+          lat, lng, category, maxRows: limit,
+          minLat: lat - dLat, maxLat: lat + dLat,
+          minLng: lng - dLng, maxLng: lng + dLng,
+        }
+      );
+      rows = result.rows;
+      const inside = rows.filter((r) => r.DIST_KM <= radiusKm).length;
+      if (inside >= limit) {
+        rows = rows.filter((r) => r.DIST_KM <= radiusKm);
+        break;
+      }
+    }
+    const result = { rows };
 
     res.json({
       items: result.rows.map((r) => ({

@@ -18,7 +18,8 @@ import {
   isDense,
   type Category,
 } from '../core/categories';
-import { subscribeMapRequest, takeMapRequest } from '../core/mapBus';
+import { ensureLocationPermission, getCurrentPosition } from '../core/location';
+import { subscribeMapRequest, takeMapRequest, type NearestInfo } from '../core/mapBus';
 import { catsOf, groupByLocation, type Shelter } from '../core/shelters';
 
 const MAX_MARKERS = 300;
@@ -92,6 +93,9 @@ export default function MapScreen() {
   const [notice, setNotice] = useState<string | null>(null);
   const [requestNote, setRequestNote] = useState<string | null>(null);
   const [openGroup, setOpenGroup] = useState<Shelter[] | null>(null);
+  const [origin, setOrigin] = useState<{ lat: number; lng: number } | null>(null); // 내 위치
+  const [nearest, setNearest] = useState<NearestInfo | null>(null); // 팝업에서 찾은 가장 가까운 대피소
+  const [locating, setLocating] = useState(false);
 
   const mapRef = useRef<NaverMapViewRef>(null);
   const selectedRef = useRef(selected);
@@ -99,6 +103,7 @@ export default function MapScreen() {
   const reqRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const noteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flashNoteRef = useRef<(text: string) => void>(() => {});
 
   const load = useCallback(async () => {
     const cam = camRef.current;
@@ -182,6 +187,14 @@ export default function MapScreen() {
       if (!req) {
         return;
       }
+      if (req.nearestOnly) {
+        // 이미 지도가 열려 있으니 카메라·종류 선택은 그대로 두고 카드와 안내만 갱신
+        setNearest(req.nearest ?? null);
+        if (req.note) {
+          flashNoteRef.current(req.note);
+        }
+        return;
+      }
       const next = {} as Record<Category, boolean>;
       CATEGORY_ORDER.forEach(c => {
         next[c] = req.categories.includes(c);
@@ -189,12 +202,23 @@ export default function MapScreen() {
       selectedRef.current = next;
       setSelected(next);
       setOpenGroup(null);
+      setOrigin(req.origin ?? null);
+      setNearest(req.nearest ?? null);
 
-      if (req.center) {
+      const zoomFor = req.categories.some(isDense) ? MIN_ZOOM_DENSE : 14;
+      if (req.origin) {
+        // 내 위치 기준: 내 위치로 이동 (가장 가까운 곳은 아래 카드의 버튼으로 이동)
+        mapRef.current?.animateCameraTo({
+          latitude: req.origin.lat,
+          longitude: req.origin.lng,
+          zoom: zoomFor,
+          duration: 500,
+        });
+      } else if (req.center) {
         mapRef.current?.animateCameraTo({
           latitude: req.center.lat,
           longitude: req.center.lng,
-          zoom: req.categories.some(isDense) ? MIN_ZOOM_DENSE : 14,
+          zoom: zoomFor,
           duration: 500,
         });
       }
@@ -218,6 +242,56 @@ export default function MapScreen() {
     };
   }, []);
 
+  const flashNote = useCallback((text: string) => {
+    if (noteTimer.current) {
+      clearTimeout(noteTimer.current);
+    }
+    setRequestNote(text);
+    noteTimer.current = setTimeout(() => setRequestNote(null), 6000);
+  }, []);
+
+  // 내 위치 버튼: 현재 위치를 구해 그곳으로 이동 (선택한 종류의 대피소는 이동 후 자동으로 불러옴)
+  flashNoteRef.current = flashNote;
+
+  const goToMyLocation = useCallback(async () => {
+    if (locating) {
+      return;
+    }
+    setLocating(true);
+    try {
+      if (!(await ensureLocationPermission())) {
+        flashNote('위치 권한이 없어 내 위치를 표시할 수 없습니다. 설정에서 위치 권한을 허용해주세요.');
+        return;
+      }
+      const here = await getCurrentPosition();
+      setOrigin(here);
+      setNearest(null);
+      const anyDense = CATEGORY_ORDER.some(c => selectedRef.current[c] && isDense(c));
+      mapRef.current?.animateCameraTo({
+        latitude: here.lat,
+        longitude: here.lng,
+        zoom: anyDense ? MIN_ZOOM_DENSE : 14,
+        duration: 500,
+      });
+    } catch {
+      flashNote('현재 위치를 가져오지 못했습니다. GPS가 켜져 있는지 확인해주세요.');
+    } finally {
+      setLocating(false);
+    }
+  }, [locating, flashNote]);
+
+  const goToNearest = useCallback(() => {
+    if (!nearest) {
+      return;
+    }
+    mapRef.current?.animateCameraTo({
+      latitude: nearest.lat,
+      longitude: nearest.lng,
+      zoom: 16,
+      duration: 500,
+    });
+  }, [nearest]);
+
   const handleIdle = useCallback(
     (e: any) => {
       const bounds = boundsFromEvent(e);
@@ -238,6 +312,17 @@ export default function MapScreen() {
         initialCamera={{ latitude: 37.4563, longitude: 126.7052, zoom: 14 }}
         onCameraIdle={handleIdle}
         onTapMap={() => setOpenGroup(null)}>
+        {origin ? (
+          <NaverMapMarkerOverlay
+            key="my-location"
+            latitude={origin.lat}
+            longitude={origin.lng}
+            width={20}
+            height={20}
+            anchor={{ x: 0.5, y: 0.5 }}>
+            <View style={styles.me} />
+          </NaverMapMarkerOverlay>
+        ) : null}
         {groups.map(g => {
           const size = markerSize(g);
           return (
@@ -282,6 +367,37 @@ export default function MapScreen() {
           </View>
         ) : null}
       </View>
+
+      {/* 내 위치 버튼 */}
+      <TouchableOpacity
+        style={[styles.locBtn, { bottom: openGroup ? 280 : nearest ? 130 : 24 }]}
+        onPress={goToMyLocation}
+        disabled={locating}>
+        <Text style={styles.locBtnText}>{locating ? '…' : '📍'}</Text>
+      </TouchableOpacity>
+
+      {/* 아래: 팝업에서 찾은 가장 가까운 대피소 */}
+      {nearest && !openGroup ? (
+        <View style={styles.card}>
+          <TouchableOpacity style={styles.close} onPress={() => setNearest(null)}>
+            <Text style={styles.closeText}>✕</Text>
+          </TouchableOpacity>
+          <Text style={styles.cardHead}>현재 위치에서 가장 가까운 곳</Text>
+          <Text style={styles.name}>{nearest.name ?? '이름 없음'}</Text>
+          <Text style={styles.line}>
+            약 {nearest.distKm < 1 ? `${Math.round(nearest.distKm * 1000)}m` : `${nearest.distKm.toFixed(1)}km`}{' '}
+            (직선거리)
+          </Text>
+          <View style={styles.actions}>
+            <TouchableOpacity style={styles.actionBtn} onPress={goToMyLocation}>
+              <Text style={styles.actionText}>내 위치 보기</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.actionBtn, styles.actionPrimary]} onPress={goToNearest}>
+              <Text style={[styles.actionText, styles.actionPrimaryText]}>가장 가까운 곳 보기</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : null}
 
       {/* 아래: 선택한 마커의 정보 카드 */}
       {openGroup ? (
@@ -352,6 +468,39 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#fff',
   },
+  me: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#2563EB',
+    borderWidth: 3,
+    borderColor: '#fff',
+  },
+  locBtn: {
+    position: 'absolute',
+    right: 12,
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 5,
+  },
+  locBtnText: { fontSize: 20 },
+  actions: { flexDirection: 'row', gap: 8, marginTop: 10 },
+  actionBtn: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+    backgroundColor: '#fff',
+  },
+  actionText: { fontSize: 13, color: '#111' },
+  actionPrimary: { backgroundColor: '#1565c0', borderColor: '#1565c0' },
+  actionPrimaryText: { color: '#fff', fontWeight: '600' },
   count: {
     borderRadius: 12,
     borderWidth: 2,

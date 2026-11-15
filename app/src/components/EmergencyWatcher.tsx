@@ -33,7 +33,9 @@ import {
 } from '../core/alertStore';
 import type { Category } from '../core/categories';
 import { GENERIC_GUIDANCE, GUIDANCE } from '../core/guidance';
-import { requestMap } from '../core/mapBus';
+import { getCurrentPosition, ensureLocationPermission } from '../core/location';
+import { requestMap, type NearestInfo } from '../core/mapBus';
+import type { Shelter } from '../core/shelters';
 
 // 어느 탭에 있어도 내 지역의 위급 문자를 감시하고 팝업으로 알려준다.
 export default function EmergencyWatcher({ onShowMap }: { onShowMap: () => void }) {
@@ -156,15 +158,72 @@ export default function EmergencyWatcher({ onShowMap }: { onShowMap: () => void 
   const guidance = GUIDANCE[current.type] ?? GENERIC_GUIDANCE;
   const color = LEVEL_COLOR[current.level] ?? '#6B7280';
 
-  // 선택한 지역의 해당 종류 대피장소 중심으로 지도를 연다 (현재 위치 기준은 다음 단계)
+  // 1) 현재 위치를 구하는 즉시 지도를 열고, 가까운 대피소 조회는 뒤에서 이어서 한다 (서버가 느려도 화면이 막히지 않게)
+  // 2) 위치를 못 구하면 선택한 지역의 대피장소 중심으로, 3) 둘 다 안 되면 지도만 연다
   const showShelters = async (category: Category) => {
     if (busy) {
       return;
     }
     setBusy(true);
     const { region, sub } = getSettings();
+    const t0 = Date.now();
+    const lap = (label: string) => {
+      if (__DEV__) {
+        console.log(`[nearby] ${label} ${Date.now() - t0}ms`);
+      }
+    };
+
+    let origin: { lat: number; lng: number } | undefined;
+    try {
+      if (await ensureLocationPermission()) {
+        lap('permission');
+        origin = await getCurrentPosition();
+        lap('position');
+      }
+    } catch {
+      origin = undefined;
+    }
+
+    if (origin) {
+      // 위치를 얻었으니 바로 지도를 연다. 가장 가까운 곳 카드는 조회가 끝나면 채워진다.
+      const here = origin;
+      setBusy(false);
+      dismiss(current);
+      requestMap({ categories: [category], origin: here, nonce: Date.now() });
+      onShowMap();
+
+      apiGet<{ items: Shelter[] }>(
+        '/api/shelters/nearby',
+        { lat: String(here.lat), lng: String(here.lng), category, limit: '5' },
+        { timeoutMs: 20000 },
+      )
+        .then(d => {
+          lap('nearby');
+          const first = d.items[0];
+          requestMap({
+            categories: [category],
+            nearestOnly: true,
+            nearest: first
+              ? { name: first.name, distKm: first.distKm ?? 0, lat: first.lat, lng: first.lng }
+              : undefined,
+            note: first ? undefined : '이 종류의 대피장소 데이터가 없습니다.',
+            nonce: Date.now(),
+          });
+        })
+        .catch(() => {
+          requestMap({
+            categories: [category],
+            nearestOnly: true,
+            note: '가까운 대피소를 불러오지 못했습니다. 지도에 표시된 대피소를 확인해주세요.',
+            nonce: Date.now(),
+          });
+        });
+      return;
+    }
+
+    // 위치를 못 구한 경우: 선택한 지역 기준
     let center: { lat: number; lng: number } | undefined;
-    let note: string | undefined;
+    let note = '현재 위치를 가져오지 못해 선택한 지역 기준으로 표시합니다. 위치 권한과 GPS를 확인해주세요.';
 
     if (region) {
       try {
@@ -186,7 +245,7 @@ export default function EmergencyWatcher({ onShowMap }: { onShowMap: () => void 
         note = '선택한 지역의 중심을 구하지 못했습니다. 지도에서 직접 이동해주세요.';
       }
     } else {
-      note = '재난문자 지역을 선택하지 않아 지도를 현재 위치 그대로 엽니다.';
+      note = '현재 위치를 가져오지 못했고 재난문자 지역도 선택하지 않아 지도를 그대로 엽니다.';
     }
 
     setBusy(false);
@@ -258,7 +317,7 @@ export default function EmergencyWatcher({ onShowMap }: { onShowMap: () => void 
                   style={[styles.btn, { backgroundColor: color, opacity: busy ? 0.7 : 1 }]}
                   disabled={busy}
                   onPress={() => showShelters(s.category)}>
-                  <Text style={styles.btnText}>{busy ? '지도를 여는 중…' : s.label}</Text>
+                  <Text style={styles.btnText}>{busy ? '내 위치 확인 중…' : s.label}</Text>
                 </TouchableOpacity>
               ))}
               <TouchableOpacity style={styles.btnGhost} onPress={() => dismiss(current)}>
