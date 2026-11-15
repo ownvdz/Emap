@@ -1,7 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { NaverMapMarkerOverlay, NaverMapView } from '@mj-studio/react-native-naver-map';
+import {
+  NaverMapMarkerOverlay,
+  NaverMapView,
+  type NaverMapViewRef,
+} from '@mj-studio/react-native-naver-map';
 import { apiGet } from '../api';
 import {
   CATEGORY_INFO,
@@ -14,12 +18,10 @@ import {
   isDense,
   type Category,
 } from '../core/categories';
+import { subscribeMapRequest, takeMapRequest } from '../core/mapBus';
 import { catsOf, groupByLocation, type Shelter } from '../core/shelters';
 
 const MAX_MARKERS = 300;
-
-// 임시: true면 라이브러리 기본 마커로 표시 (커스텀 마커 문제 구분용)
-const DEBUG_PLAIN_MARKERS = false;
 
 type Bounds = { swLat: number; swLng: number; neLat: number; neLng: number };
 
@@ -88,13 +90,15 @@ export default function MapScreen() {
   const [selected, setSelected] = useState<Record<Category, boolean>>({ ...DEFAULT_SELECTED });
   const [groups, setGroups] = useState<Shelter[][]>([]);
   const [notice, setNotice] = useState<string | null>(null);
+  const [requestNote, setRequestNote] = useState<string | null>(null);
   const [openGroup, setOpenGroup] = useState<Shelter[] | null>(null);
-  const [debug, setDebug] = useState('시작');
 
+  const mapRef = useRef<NaverMapViewRef>(null);
   const selectedRef = useRef(selected);
   const camRef = useRef<{ bounds: Bounds; zoom: number } | null>(null);
   const reqRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
+  const noteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(async () => {
     const cam = camRef.current;
@@ -106,7 +110,6 @@ export default function MapScreen() {
     if (categories.length === 0) {
       abortRef.current?.abort();
       setGroups([]);
-      setDebug('조회 안 함 (선택한 종류 없음)');
       setNotice('표시할 항목을 선택해주세요.');
       return;
     }
@@ -120,7 +123,6 @@ export default function MapScreen() {
     if (loadable.length === 0) {
       abortRef.current?.abort();
       setGroups([]);
-      setDebug(`조회 안 함 (배율 ${cam.zoom})`);
       setNotice(
         categories.every(isDense)
           ? '쉼터는 지도를 더 확대해야 표시됩니다.'
@@ -135,7 +137,6 @@ export default function MapScreen() {
     const myReq = ++reqRef.current;
 
     try {
-      setDebug(`요청 중 (${loadable.length}종, 배율 ${cam.zoom})`);
       const { bounds } = cam;
       const data = await apiGet<{ items: Shelter[]; truncated: boolean }>(
         '/api/shelters',
@@ -152,9 +153,7 @@ export default function MapScreen() {
       if (myReq !== reqRef.current) {
         return; // 그 사이에 더 새로운 요청이 시작됨
       }
-      const next = groupByLocation(data.items);
-      setDebug(`응답 ${data.items.length}건 → 마커 ${next.length}개`);
-      setGroups(next);
+      setGroups(groupByLocation(data.items));
       setNotice(
         data.truncated
           ? '대피소가 많아 일부만 표시 중입니다. 더 확대해주세요.'
@@ -166,7 +165,6 @@ export default function MapScreen() {
       if (myReq !== reqRef.current || (e as Error).name === 'AbortError') {
         return;
       }
-      setDebug(`오류: ${(e as Error).message}`);
       setNotice(`대피소 정보를 불러오지 못했습니다. (${(e as Error).message})`);
     }
   }, []);
@@ -177,17 +175,55 @@ export default function MapScreen() {
     load();
   }, [selected, load]);
 
+  // 재난 팝업에서 온 요청: 해당 종류만 켜고, 선택한 지역의 중심으로 이동
+  useEffect(() => {
+    const apply = () => {
+      const req = takeMapRequest();
+      if (!req) {
+        return;
+      }
+      const next = {} as Record<Category, boolean>;
+      CATEGORY_ORDER.forEach(c => {
+        next[c] = req.categories.includes(c);
+      });
+      selectedRef.current = next;
+      setSelected(next);
+      setOpenGroup(null);
+
+      if (req.center) {
+        mapRef.current?.animateCameraTo({
+          latitude: req.center.lat,
+          longitude: req.center.lng,
+          zoom: req.categories.some(isDense) ? MIN_ZOOM_DENSE : 14,
+          duration: 500,
+        });
+      }
+
+      if (noteTimer.current) {
+        clearTimeout(noteTimer.current);
+      }
+      setRequestNote(req.note ?? null);
+      if (req.note) {
+        noteTimer.current = setTimeout(() => setRequestNote(null), 8000);
+      }
+    };
+
+    apply(); // 지도 탭이 만들어지기 전에 도착한 요청도 처리
+    const unsubscribe = subscribeMapRequest(apply);
+    return () => {
+      unsubscribe();
+      if (noteTimer.current) {
+        clearTimeout(noteTimer.current);
+      }
+    };
+  }, []);
+
   const handleIdle = useCallback(
     (e: any) => {
       const bounds = boundsFromEvent(e);
       if (!bounds) {
-        const raw = JSON.stringify(e);
-        console.log('화면 영역을 읽지 못했습니다:', raw);
-        setDebug(`영역을 못 읽음: ${raw.slice(0, 160)}`);
         return;
       }
-      console.log('범위', JSON.stringify(bounds), '배율', e.zoom);
-      setDebug(`카메라 정지 (배율 ${e.zoom})`);
       camRef.current = { bounds, zoom: Number(e.zoom) };
       load();
     },
@@ -197,6 +233,7 @@ export default function MapScreen() {
   return (
     <View style={styles.root}>
       <NaverMapView
+        ref={mapRef}
         style={styles.map}
         initialCamera={{ latitude: 37.4563, longitude: 126.7052, zoom: 14 }}
         onCameraIdle={handleIdle}
@@ -212,7 +249,7 @@ export default function MapScreen() {
               height={size.height}
               anchor={{ x: 0.5, y: 0.5 }}
               onTap={() => setOpenGroup(g)}>
-              {DEBUG_PLAIN_MARKERS ? null : <MarkerView group={g} />}
+              <MarkerView group={g} />
             </NaverMapMarkerOverlay>
           );
         })}
@@ -234,6 +271,11 @@ export default function MapScreen() {
             );
           })}
         </View>
+        {requestNote ? (
+          <View style={styles.notice}>
+            <Text style={styles.noticeText}>{requestNote}</Text>
+          </View>
+        ) : null}
         {notice ? (
           <View style={styles.notice}>
             <Text style={styles.noticeText}>{notice}</Text>
@@ -270,9 +312,6 @@ export default function MapScreen() {
           </ScrollView>
         </View>
       ) : null}
-
-      {/* 임시 진단 문구 (정상 확인 후 지웁니다) */}
-      <Text style={styles.debug}>{debug}</Text>
     </View>
   );
 }
@@ -325,7 +364,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 10,
     right: 10,
-    bottom: 40,
+    bottom: 16,
     backgroundColor: '#fff',
     borderRadius: 14,
     padding: 12,
@@ -351,14 +390,4 @@ const styles = StyleSheet.create({
   badgeText: { color: '#fff', fontSize: 11 },
   name: { fontWeight: '700', color: '#111', fontSize: 14 },
   line: { fontSize: 13, color: '#374151', marginTop: 2 },
-  debug: {
-    position: 'absolute',
-    left: 8,
-    right: 8,
-    bottom: 8,
-    backgroundColor: 'rgba(255,255,0,0.9)',
-    padding: 4,
-    fontSize: 11,
-    color: '#000',
-  },
 });
