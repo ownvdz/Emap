@@ -1,8 +1,8 @@
 import axios from 'axios';
-import { API_URL, PAGE_SIZE, REGIONS, extractItems, normalize, toYmd } from './alerts.js';
-import { buildMessages, pickNew, topicsForAlert } from './pushLogic.js';
+import { API_URL, PAGE_SIZE, extractItems, normalize, toYmd } from './alerts.js';
+import { NATIONWIDE_TOPIC, buildMessages, pickNew } from './pushLogic.js';
 
-// 긴급재난·위급재난 문자를 감지해서 FCM 푸시를 보낸다.
+// 긴급재난·위급재난 문자를 감지해서 전국 모든 기기에 FCM 푸시를 보낸다.
 // 켜는 방법(.env):
 //   PUSH_ENABLED=1
 //   GOOGLE_APPLICATION_CREDENTIALS=/home/ubuntu/emap-fcm-key.json   (Firebase 서비스 계정 키 파일 경로. 레포 밖에 보관)
@@ -55,14 +55,10 @@ async function fetchTodayAll() {
 }
 
 async function deliver(alert) {
-  const topics = topicsForAlert(alert.region, REGIONS).slice(0, 500);
-  if (topics.length === 0) {
-    console.warn(`[push] 수신 지역을 해석하지 못해 보내지 않음: id=${alert.id} region="${alert.region}"`);
-    return;
-  }
+  const topics = [NATIONWIDE_TOPIC]; // 지역과 관계없이 전국 전체
   const messages = buildMessages(alert, topics);
   if (!messagingApi) {
-    console.log(`[push][dry-run] ${alert.level} ${alert.type} id=${alert.id} → 토픽 ${topics.length}개`);
+    console.log(`[push][dry-run] ${alert.level} ${alert.type} id=${alert.id} region="${alert.region}" → 전국`);
     console.log(`[push][dry-run] ${alert.message.slice(0, 80)}`);
     return;
   }

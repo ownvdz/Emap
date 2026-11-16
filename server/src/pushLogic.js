@@ -1,17 +1,8 @@
 // 푸시 알림의 순수 로직 (네트워크·Firebase 없이 테스트할 수 있도록 따로 둠)
-// ※ 토픽 이름 규칙은 앱의 app/src/core/pushTopics.ts 와 반드시 같아야 한다.
+// ※ 토픽 이름(NATIONWIDE_TOPIC)은 앱의 app/src/core/pushTopics.ts 와 반드시 같아야 한다.
 
-// FCM 토픽 이름에는 [a-zA-Z0-9-_.~%] 만 쓸 수 있어서, 한글 지역명은 퍼센트 인코딩해서 쓴다.
-const enc = (s) =>
-  encodeURIComponent(s).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
-
-// kind: 'a' = 시도 전체를 받는 사람, 'w' = 시도 전체로 온 문자를 받는 사람(시군구 선택자),
-//       's' = 특정 시군구 문자를 받는 사람
-export function topicName(kind, sido, sub = '') {
-  return sub ? `${kind}_${enc(sido)}_${enc(sub)}` : `${kind}_${enc(sido)}`;
-}
-
-const norm = (s) => String(s).replace(/\s+/g, ' ').trim();
+// 긴급재난·위급재난은 지역과 관계없이 전국 모든 기기에 보낸다. 앱은 실행하면 이 토픽을 구독한다.
+export const NATIONWIDE_TOPIC = 'alert_all';
 
 // 푸시를 보낼 문자인지: 위급재난은 항상, 긴급재난은 훈련 문자가 아닐 때 (앱 팝업 기준과 같음)
 export function qualifies(alert) {
@@ -26,27 +17,6 @@ export function parseKst(s) {
   if (!m) return null;
   const t = Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}+09:00`);
   return Number.isNaN(t) ? null : t;
-}
-
-// 문자의 수신 지역("서울특별시 강남구, 경기도 전체" 같은 문자열)에서 푸시를 보낼 토픽 목록을 만든다.
-export function topicsForAlert(regionText, regions) {
-  const topics = new Set();
-  for (const raw of String(regionText).split(',')) {
-    const part = norm(raw);
-    const sido = regions.find((r) => part === r || part.startsWith(`${r} `));
-    if (!sido) continue;
-
-    topics.add(topicName('a', sido)); // 시도 전체를 받겠다고 한 사람
-    const rest = part.slice(sido.length).trim();
-    if (!rest || rest === '전체') {
-      topics.add(topicName('w', sido)); // 시군구를 고른 사람도 시도 전체 문자는 받음
-    } else {
-      topics.add(topicName('s', sido, rest));
-      const first = rest.split(' ')[0]; // "수원시 영통구" → "수원시"를 고른 사람도 받도록
-      if (first !== rest) topics.add(topicName('s', sido, first));
-    }
-  }
-  return [...topics];
 }
 
 // 새로 보낼 문자를 고른다.

@@ -8,14 +8,11 @@ import {
   unsubscribeFromTopic,
 } from '@react-native-firebase/messaging';
 import type { Alert } from './alerts';
-import { getSettings, loadSettings, subscribeSettings } from './alertStore';
 import { getItem, setItem } from './storage';
-import { topicsFor } from './pushTopics';
+import { NATIONWIDE_TOPIC } from './pushTopics';
 
 // 서버가 보낸 긴급재난·위급재난 푸시를 받아서 기존 팝업(EmergencyWatcher)으로 넘긴다.
-// 선택한 지역에 맞는 FCM 토픽을 구독하는 방식이라, 기기 정보를 서버에 따로 저장하지 않는다.
-
-const TOPICS_KEY = 'emap.pushTopics';
+// 전국 공통 FCM 토픽을 구독하는 방식이라, 기기 정보를 서버에 따로 저장하지 않는다.
 
 // ---------- 푸시 → 팝업 전달 ----------
 const alertListeners = new Set<(a: Alert) => void>();
@@ -59,18 +56,29 @@ function toAlert(msg: PushMessage): Alert | null {
 }
 
 // ---------- 알림 권한 (안드로이드 13 이상) ----------
+let askedPermission = false; // 앱을 켜 둔 동안 같은 권한 창을 반복해서 띄우지 않음
+
 async function ensureNotificationPermission() {
   if (Platform.OS !== 'android' || Number(Platform.Version) < 33) {
     return;
   }
   try {
+    if (await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS)) {
+      return;
+    }
+    if (askedPermission) {
+      return;
+    }
+    askedPermission = true;
     await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
   } catch {
     /* 권한 요청이 실패해도 앱은 계속 동작 */
   }
 }
 
-// ---------- 토픽 구독 동기화 ----------
+// ---------- 토픽 구독 ----------
+const TOPICS_KEY = 'emap.pushTopics';
+
 async function readSaved(): Promise<string[]> {
   try {
     const v = JSON.parse((await getItem(TOPICS_KEY)) ?? '[]');
@@ -82,28 +90,21 @@ async function readSaved(): Promise<string[]> {
 
 let chain: Promise<void> = Promise.resolve();
 
-// 선택한 지역이 바뀔 때마다 이전 지역은 구독 해지하고 새 지역을 구독한다 (한 번에 하나씩 순서대로)
+// 전국 토픽을 구독한다 (한 번만 성공하면 저장해 두고, 실패하면 다음에 다시 시도).
+// 이전 버전에서 구독했던 지역별 토픽이 있으면 함께 해지한다.
 export function syncPushTopics(): Promise<void> {
   chain = chain.then(async () => {
-    const keep: string[] = [];
     try {
-      const { region, sub } = getSettings();
-      const next = topicsFor(region, sub);
+      await ensureNotificationPermission();
       const prev = await readSaved();
-      if (next.length > 0) {
-        await ensureNotificationPermission();
-      }
       const messaging = getMessaging();
-      for (const t of prev.filter(t => !next.includes(t))) {
+      for (const t of prev.filter(t => t !== NATIONWIDE_TOPIC)) {
         await unsubscribeFromTopic(messaging, t);
       }
-      for (const t of next) {
-        if (!prev.includes(t)) {
-          await subscribeToTopic(messaging, t);
-        }
-        keep.push(t);
+      if (!prev.includes(NATIONWIDE_TOPIC)) {
+        await subscribeToTopic(messaging, NATIONWIDE_TOPIC);
       }
-      await setItem(TOPICS_KEY, JSON.stringify(keep));
+      await setItem(TOPICS_KEY, JSON.stringify([NATIONWIDE_TOPIC]));
     } catch {
       // 인터넷이 없거나 Firebase 설정이 빠진 경우: 저장하지 않아서 다음에 다시 시도한다 (앱은 계속 동작)
     }
@@ -150,9 +151,8 @@ export function initPush(): () => void {
     })
     .catch(() => {});
 
-  // 지역 선택에 맞춰 구독
-  loadSettings().then(() => syncPushTopics());
-  offs.push(subscribeSettings(() => syncPushTopics()));
+  // 전국 토픽 구독 (실패했다면 앱을 켤 때마다 다시 시도)
+  syncPushTopics();
 
   return () => {
     offs.forEach(off => off());

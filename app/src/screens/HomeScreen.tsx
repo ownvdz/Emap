@@ -185,12 +185,10 @@ export default function HomeScreen() {
         </TouchableOpacity>
       </View>
 
-      {region ? (
-        <Text style={styles.hint}>
-          긴급재난·위급재난 문자는 앱이 꺼져 있어도 푸시 알림으로 알려드립니다. 알림을 누르면 행동요령과 가까운
-          대피장소가 표시됩니다. (알림 권한 필요)
-        </Text>
-      ) : null}
+      <Text style={styles.hint}>
+        긴급재난·위급재난 문자는 지역과 관계없이 전국 어디서든 푸시 알림으로 알려드립니다. 알림을 누르면 행동요령과
+        내 위치에서 가까운 대피장소가 표시됩니다. (알림 권한 필요)
+      </Text>
       {!region ? (
         <Text style={styles.hint}>
           지역을 선택하면 해당 지역의 최근 재난문자를 보여드리고, 지진·지진해일·민방공 같은 위급 문자는
