@@ -5,6 +5,7 @@ import { initPool, query } from './db.js';
 import { decodeEntities } from './utils/text.js';
 import { fetchAlerts, REGIONS } from './alerts.js';
 import { getRegionTree } from './regions.js';
+import { startPushWorker } from './push.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -227,7 +228,12 @@ app.get('/api/shelters/nearby', async (req, res) => {
 });
 
 initPool()
-  .then(() => app.listen(PORT, () => console.log(`Server on :${PORT}`)))
+  .then(() =>
+    app.listen(PORT, () => {
+      console.log(`Server on :${PORT}`);
+      startPushWorker(); // PUSH_ENABLED=1 일 때만 동작
+    })
+  )
   .catch((e) => {
     console.error('DB init failed', e);
     process.exit(1);

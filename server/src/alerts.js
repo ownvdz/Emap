@@ -1,8 +1,8 @@
 import axios from 'axios';
 
-const API_URL = 'https://www.safetydata.go.kr/V2/api/DSSP-IF-00247';
+export const API_URL = 'https://www.safetydata.go.kr/V2/api/DSSP-IF-00247';
 const LOOKBACK_DAYS = 3;        // 최근 며칠치를 볼지
-const PAGE_SIZE = 100;
+export const PAGE_SIZE = 100;
 const MAX_PAGES = 5;            // 시도 하나당 최대 500건까지 수집
 const CACHE_TTL_MS = 60 * 1000; // API 갱신주기(1분)에 맞춤
 
@@ -15,14 +15,14 @@ export const REGIONS = [
 
 const cache = new Map(); // 시도 -> { at, payload }  (시군구 필터 적용 전 전체 결과)
 
-function toYmd(date) {
+export function toYmd(date) {
   const m = String(date.getMonth() + 1).padStart(2, '0');
   const d = String(date.getDate()).padStart(2, '0');
   return `${date.getFullYear()}${m}${d}`;
 }
 
 // 응답 구조가 조금 달라도 항목 배열을 찾아냄
-function extractItems(data) {
+export function extractItems(data) {
   const body = data?.body ?? data?.response?.body;
   if (Array.isArray(body)) return body;
   const items = body?.items ?? body?.item;
@@ -31,7 +31,7 @@ function extractItems(data) {
   return [];
 }
 
-function normalize(row) {
+export function normalize(row) {
   return {
     id: String(row.SN ?? ''),
     createdAt: row.CRT_DT ?? '',

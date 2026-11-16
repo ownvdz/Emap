@@ -7,6 +7,7 @@ import {
   ScrollView,
   StatusBar,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   TouchableOpacity,
@@ -18,6 +19,7 @@ import {
 import {
   addEventListener,
   connect,
+  disconnect,
   discoverServices,
   isBluetoothEnabled,
   requestBluetoothPermission,
@@ -32,14 +34,32 @@ import {
   writeCharacteristic,
 } from 'munim-bluetooth';
 
+import {
+  applyTopology,
+  buildTree,
+  countNodes,
+  createGraph,
+  flattenTree,
+  pruneGraph,
+  type Graph,
+  type TreeLine,
+} from '../core/meshGraph';
+
 // 우리 앱 전용 UUID (모든 기기가 같은 값을 써야 서로 찾음)
 const SERVICE_UUID = '71f271d0-8f4c-4c4d-8a2d-6f3a9497b41d';
 const CHAR_UUID = '4ad4a6d2-3f4a-477c-9832-5e0d8f7654d8';
 const MAX_HOPS = 3;
 
-// 생존 확인 설정
-const PING_INTERVAL_MS = 5000; // 이 간격으로 "나 여기 있음" 신호 전송
-const PEER_TIMEOUT_MS = 15000; // 이 시간 동안 확인이 없으면 기기가 사라진 것으로 처리
+// 토폴로지(이웃 목록) 갱신 설정
+const TOPO_INTERVAL_MS = 60_000; // 이 간격으로 내 이웃 목록을 주변에 알림
+const TOPO_JITTER_MS = 5_000; // 모든 기기가 동시에 보내 충돌하지 않도록 0~5초 무작위 지연
+const TOPO_MIN_GAP_MS = 10_000; // 연결 변화로 앞당겨 보낼 때도 이 간격보다 자주 보내지 않음
+const NODE_TTL_MS = 150_000; // 갱신 2.5번 동안 소식이 없으면 그래프에서 제거
+const PKT_TTL_MS = 150_000; // 패킷으로 확인한 직접 이웃의 유효 시간
+const SCAN_TTL_MS = 20_000; // 광고 스캔으로 확인한 이웃의 유효 시간
+const MAX_NEIGHBORS_SENT = 12; // 패킷이 MTU(185)를 넘지 않도록 알리는 이웃 수 제한
+const VIEW_REFRESH_MS = 5_000; // 화면 갱신 주기 (통신 없이 만료 처리만)
+const MAX_SEEN = 500; // 중복 방지용 메시지 id 보관 한도
 
 // ---------- 문자열 <-> hex (UTF-8) ----------
 function toHex(s: string): string {
@@ -94,19 +114,25 @@ function fromHex(hexRaw: string): string {
   return out;
 }
 
-// p: 1 이면 생존 신호(화면에 표시하지 않고 중계하지 않음)
-type Msg = { i: string; f: string; t: string; h: number; p?: number };
+type Msg = { i: string; f: string; t: string; h: number };
+// 토폴로지: 보낸 기기(f)의 직접 이웃 목록(n)과 순번(s). g:1이면 채팅이 아니라 토폴로지 메시지
+type Topo = { f: string; h: number; g: 1; s: number; n: string[] };
 type Line = { key: number; text: string; mine?: boolean };
 
 const rand = () => Math.random().toString(36).slice(2, 8);
 
-function BleChat() {
+function BleChat({ onTurnOff }: { onTurnOff: () => void }) {
   const insets = useSafeAreaInsets();
+  const aliveRef = useRef(true); // 메시를 끄면(화면이 사라지면) false가 되어 진행 중이던 작업이 중단됨
   const myId = useRef(rand().slice(0, 4)).current;
   const peers = useRef(new Set<string>()); // 내가 Central로 연결한 링크(BLE 주소)
   const connecting = useRef(new Set<string>());
   const seen = useRef(new Set<string>()); // 중복 메시지 방지
-  const presence = useRef(new Map<string, number>()); // 앱 ID -> 마지막 생존 확인 시각
+  const directSeen = useRef(new Map<string, { pkt: number; scan: number }>()); // 앱 ID -> 직접 확인한 마지막 시각
+  const graph = useRef<Graph>(createGraph()); // 다른 기기들이 알려준 이웃 목록
+  const topoSeq = useRef(0);
+  const lastTopoSent = useRef(0);
+  const topoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const linkPeer = useRef(new Map<string, string>()); // 내가 연 링크(BLE 주소) -> 상대 앱 ID
   const lineKey = useRef(0);
   const scanSeen = useRef(new Set<string>());
@@ -115,7 +141,10 @@ function BleChat() {
 
   const [status, setStatus] = useState('시작 중...');
   const [linkCount, setLinkCount] = useState(0);
-  const [peerIds, setPeerIds] = useState<string[]>([]);
+  const [direct, setDirect] = useState<string[]>([]); // 직접 이웃
+  const [treeLines, setTreeLines] = useState<TreeLine[]>([]);
+  const [nodeCount, setNodeCount] = useState(1); // 나 포함 메시 전체
+  const [lastTopo, setLastTopo] = useState('');
   const [input, setInput] = useState('');
   const [chat, setChat] = useState<Line[]>([]); // 채팅 메시지만
   const [events, setEvents] = useState<Line[]>([]); // 연결/오류 같은 시스템 이벤트
@@ -148,36 +177,54 @@ function BleChat() {
     setChat(prev => [...prev.slice(-199), { key: lineKey.current++, text, mine }]);
   }, []);
 
-  // 상대 앱이 살아 있음을 표시 (생존 신호 수신 또는 쓰기 응답 확인 시)
-  const markAlive = useCallback(
-    (pid: string) => {
-      if (!presence.current.has(pid)) {
-        log(`기기 확인: ${pid}`);
+  // 직접 이웃을 확인했다고 기록 (pkt: 패킷을 직접 받음, scan: 광고 스캔에서 이름을 봄)
+  const markDirect = useCallback((pid: string, kind: 'pkt' | 'scan') => {
+    const t = directSeen.current.get(pid) ?? { pkt: 0, scan: 0 };
+    t[kind] = Date.now();
+    directSeen.current.set(pid, t);
+  }, []);
+
+  // 직접 이웃 = 연결된 링크의 상대 + 최근 광고 스캔으로 본 기기 + 최근 직접 받은 패킷의 보낸 기기
+  const getDirect = useCallback((): string[] => {
+    const now = Date.now();
+    const ids = new Set<string>();
+    peers.current.forEach(link => {
+      const pid = linkPeer.current.get(link);
+      if (pid) {
+        ids.add(pid);
       }
-      presence.current.set(pid, Date.now());
-      setPeerIds(Array.from(presence.current.keys()));
-    },
-    [log],
-  );
+    });
+    directSeen.current.forEach((t, pid) => {
+      if (now - t.pkt <= PKT_TTL_MS || now - t.scan <= SCAN_TTL_MS) {
+        ids.add(pid);
+      } else {
+        directSeen.current.delete(pid);
+      }
+    });
+    ids.delete(myId);
+    return Array.from(ids).sort();
+  }, [myId]);
+
+  // 그래프에서 만료된 기기를 지우고, 내 기기를 뿌리로 한 트리를 다시 만든다 (통신 없음)
+  const refreshView = useCallback(() => {
+    pruneGraph(graph.current, Date.now(), NODE_TTL_MS);
+    const neighbors = getDirect();
+    const tree = buildTree(graph.current, myId, neighbors);
+    setDirect(neighbors);
+    setNodeCount(countNodes(tree));
+    setTreeLines(flattenTree(tree, `나 (${myId})`));
+  }, [getDirect, myId]);
 
   // 연결된 모든 상대에게 전송 (내가 연결한 상대: write / 나에게 연결한 상대: notify)
   const broadcast = useCallback(
-    (msg: Msg, silent = false) => {
+    (msg: Msg | Topo, silent = false) => {
       const hex = toHex(JSON.stringify(msg));
       peers.current.forEach(id => {
-        writeCharacteristic(id, SERVICE_UUID, CHAR_UUID, hex, 'write')
-          .then(() => {
-            // 쓰기 응답이 왔다 = 상대 기기의 블루투스가 살아 있음 (상대 앱 타이머와 무관)
-            const pid = linkPeer.current.get(id);
-            if (pid) {
-              markAlive(pid);
-            }
-          })
-          .catch((e: any) => {
+        writeCharacteristic(id, SERVICE_UUID, CHAR_UUID, hex, 'write').catch((e: any) => {
             if (!silent) {
-              log(`전송 실패(${id.slice(-5)}): ${e?.message ?? e}`);
-            }
-          });
+            log(`전송 실패(${id.slice(-5)}): ${e?.message ?? e}`);
+          }
+        });
       });
       try {
         updateCharacteristicValue(SERVICE_UUID, CHAR_UUID, hex, true);
@@ -187,70 +234,124 @@ function BleChat() {
         }
       }
     },
-    [log, markAlive],
+    [log],
   );
 
   // deviceId: 내가 연결한 상대가 notify로 보낸 경우에만 전달됨(링크 식별용)
   const handleIncoming = useCallback(
     (hex: string, deviceId?: string) => {
-      let msg: Msg;
+      let parsed: Msg | Topo;
       try {
-        msg = JSON.parse(fromHex(hex));
+        parsed = JSON.parse(fromHex(hex));
       } catch {
         return;
       }
-      if (!msg || !msg.f || msg.f === myId) {
+      if (!parsed || !parsed.f || parsed.f === myId) {
         return;
       }
-      // 생존 신호: 주변 기기 목록만 갱신
-      if (msg.p) {
-        // 생존 신호는 중계되지 않으므로, 이 링크의 상대가 누구인지 알 수 있음
+      // 홉 수가 줄지 않은 채 도착했다면 보낸 기기가 바로 내 이웃이다 (중계된 메시지는 홉이 줄어 있음)
+      if (parsed.h === MAX_HOPS) {
+        markDirect(parsed.f, 'pkt');
         if (deviceId) {
-          linkPeer.current.set(deviceId, msg.f);
+          linkPeer.current.set(deviceId, parsed.f); // 이 링크의 상대가 누구인지 알 수 있음
         }
-        markAlive(msg.f);
+      }
+
+      // 토폴로지: 더 새로운 순번이면 그래프에 반영하고 한 번만 중계
+      if ('g' in parsed) {
+        if (typeof parsed.s !== 'number' || !Array.isArray(parsed.n)) {
+          return;
+        }
+        const neighbors = parsed.n.slice(0, MAX_NEIGHBORS_SENT).map(String);
+        if (!applyTopology(graph.current, parsed.f, parsed.s, neighbors, Date.now())) {
+          return;
+        }
+        refreshView();
+        if (parsed.h > 0) {
+          broadcast({ ...parsed, h: parsed.h - 1 }, true);
+        }
         return;
       }
+
+      const msg = parsed;
       if (!msg.i || seen.current.has(msg.i)) {
         return;
       }
       seen.current.add(msg.i);
+      if (seen.current.size > MAX_SEEN) {
+        const oldest = seen.current.values().next().value;
+        if (oldest !== undefined) {
+          seen.current.delete(oldest);
+        }
+      }
       addChat(`[${msg.f}] ${msg.t}`);
       if (msg.h > 0) {
         broadcast({ ...msg, h: msg.h - 1 }); // 단순 중계
       }
     },
-    [addChat, broadcast, markAlive, myId],
+    [addChat, broadcast, markDirect, myId, refreshView],
   );
 
   // 최신 handleIncoming을 이벤트 리스너에서 쓰기 위한 ref
   const incomingRef = useRef(handleIncoming);
   incomingRef.current = handleIncoming;
 
-  // 생존 신호 전송 + 사라진 기기 정리
-  useEffect(() => {
-    const pingTimer = setInterval(() => {
-      broadcast({ i: rand(), f: myId, t: '', h: 0, p: 1 }, true);
-    }, PING_INTERVAL_MS);
+  // 내 이웃 목록을 알림 (순번을 붙여 모든 기기가 최신 것만 반영)
+  const sendTopology = useCallback(() => {
+    const now = Date.now();
+    lastTopoSent.current = now;
+    topoSeq.current = Math.max(topoSeq.current + 1, Math.floor(now / 1000)); // 앱을 다시 켜도 순번이 줄지 않게
+    const msg: Topo = {
+      f: myId,
+      h: MAX_HOPS,
+      g: 1,
+      s: topoSeq.current,
+      n: getDirect().slice(0, MAX_NEIGHBORS_SENT),
+    };
+    broadcast(msg, true);
+    setLastTopo(new Date(now).toLocaleTimeString('ko-KR'));
+    refreshView();
+  }, [broadcast, getDirect, myId, refreshView]);
 
-    const pruneTimer = setInterval(() => {
-      const now = Date.now();
-      presence.current.forEach((ts, pid) => {
-        if (now - ts > PEER_TIMEOUT_MS) {
-          presence.current.delete(pid);
-          log(`기기 사라짐: ${pid}`);
-        }
-      });
-      setPeerIds(Array.from(presence.current.keys()));
-    }, 3000);
+  // 연결이 바뀌었을 때 앞당겨 알리되, 너무 자주 보내지는 않음
+  const scheduleTopology = useCallback(
+    (delayMs: number) => {
+      if (topoTimer.current) {
+        return;
+      }
+      const wait = Math.max(delayMs, lastTopoSent.current + TOPO_MIN_GAP_MS - Date.now());
+      topoTimer.current = setTimeout(() => {
+        topoTimer.current = null;
+        sendTopology();
+      }, wait);
+    },
+    [sendTopology],
+  );
+  const scheduleTopoRef = useRef(scheduleTopology);
+  scheduleTopoRef.current = scheduleTopology;
+
+  // 1분마다 알리고(기기마다 조금씩 어긋나게), 화면은 5초마다 만료만 처리 (통신 없음)
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    const loop = () => {
+      sendTopology();
+      timer = setTimeout(loop, TOPO_INTERVAL_MS + Math.random() * TOPO_JITTER_MS);
+    };
+    timer = setTimeout(loop, 3000 + Math.random() * TOPO_JITTER_MS);
+    const view = setInterval(refreshView, VIEW_REFRESH_MS);
 
     return () => {
-      clearInterval(pingTimer);
-      clearInterval(pruneTimer);
+      clearTimeout(timer);
+      clearInterval(view);
+      if (topoTimer.current) {
+        clearTimeout(topoTimer.current);
+        topoTimer.current = null;
+      }
     };
-  }, [broadcast, log, myId]);
+  }, [sendTopology, refreshView]);
 
   useEffect(() => {
+    aliveRef.current = true;
     const offs: Array<() => void> = [];
     const listen = (name: string, cb: (e: any) => void) => {
       const off: any = (addEventListener as any)(name, cb);
@@ -291,6 +392,11 @@ function BleChat() {
           return;
         }
 
+        // 권한 창이 떠 있는 동안 메시를 껐다면 여기서 중단
+        if (!aliveRef.current) {
+          return;
+        }
+
         // GATT 서버: 메시지 주고받는 characteristic 1개
         setServices([
           {
@@ -318,6 +424,7 @@ function BleChat() {
           linkPeer.current.delete(e.deviceId);
           setLinkCount(peers.current.size);
           log(`연결 끊김: ${String(e.deviceId).slice(-5)}`);
+          scheduleTopoRef.current(2000); // 연결이 바뀌었으니 이웃 목록을 앞당겨 알림
         });
         listen('advertisingStarted', () => log('광고 시작됨'));
         listen('advertisingStartFailed', e =>
@@ -336,6 +443,11 @@ function BleChat() {
           if (!scanSeen.current.has(id) && scanSeen.current.size < 20) {
             scanSeen.current.add(id);
             log(`스캔: ${name || '(이름없음)'} ${id.slice(-5)}`);
+          }
+
+          // 광고 이름(BT-앱ID)이 보이면 연결 없이도 가까이 있다는 증거
+          if (name.startsWith('BT-') && name.slice(3) !== myId) {
+            markDirect(name.slice(3), 'scan');
           }
 
           const isPeer =
@@ -361,9 +473,17 @@ function BleChat() {
                 await requestMTU(id, 185);
               } catch {}
               await discoverServices(id);
+              if (!aliveRef.current) {
+                // 연결하는 사이에 메시를 껐다면 바로 끊는다
+                try {
+                  disconnect(id);
+                } catch {}
+                return;
+              }
               peers.current.add(id);
               setLinkCount(peers.current.size);
               log(`연결됨: ${name || id.slice(-5)}`);
+              scheduleTopoRef.current(2000);
               try {
                 await subscribeToCharacteristic(id, SERVICE_UUID, CHAR_UUID);
               } catch (err: any) {
@@ -393,13 +513,22 @@ function BleChat() {
     })();
 
     return () => {
+      aliveRef.current = false;
       offs.forEach(off => off());
       try {
         stopScan();
         stopAdvertising();
       } catch {}
+      // 내가 연결한 상대와의 연결도 모두 끊는다
+      peers.current.forEach(id => {
+        try {
+          disconnect(id);
+        } catch {}
+      });
+      peers.current.clear();
+      connecting.current.clear();
     };
-  }, [log, myId]);
+  }, [log, myId, markDirect]);
 
   const send = () => {
     const text = input.trim();
@@ -436,7 +565,11 @@ function BleChat() {
         enabled={needsKeyboardAvoid}>
         <View style={styles.header}>
           <View style={styles.titleRow}>
-            <Text style={styles.title}>BLE 메시지 테스트</Text>
+            <Text style={styles.title}>근처 메시</Text>
+            <View style={styles.switchRow}>
+              <Text style={styles.switchLabel}>켜짐</Text>
+              <Switch value onValueChange={() => onTurnOff()} />
+            </View>
             <TouchableOpacity
               style={styles.toggle}
               onPress={() => setShowEvents(v => !v)}>
@@ -447,9 +580,23 @@ function BleChat() {
           </View>
           <Text style={styles.sub}>{status}</Text>
           <Text style={styles.peers}>
-            연결된 기기 ({peerIds.length}대)
-            {peerIds.length > 0 ? `: ${peerIds.join(', ')}` : ''}
+            직접 이웃 {direct.length}대 · 메시 전체 {nodeCount - 1}대
           </Text>
+          <ScrollView style={styles.tree} nestedScrollEnabled>
+            {treeLines.map((l, i) => (
+              <Text key={`${l.id}-${i}`} style={styles.treeLine}>
+                {l.text}
+              </Text>
+            ))}
+          </ScrollView>
+          <View style={styles.treeFooter}>
+            <Text style={styles.subSmall}>
+              1분마다 갱신{lastTopo ? ` · 마지막 전송 ${lastTopo}` : ''}
+            </Text>
+            <TouchableOpacity style={styles.toggle} onPress={sendTopology}>
+              <Text style={styles.toggleText}>지금 갱신</Text>
+            </TouchableOpacity>
+          </View>
           {showEvents ? (
             <Text style={styles.subSmall}>내가 연 BLE 연결 {linkCount}개</Text>
           ) : null}
@@ -493,8 +640,40 @@ function BleChat() {
   );
 }
 
+// 꺼져 있는 동안은 권한 요청·광고·스캔·연결을 전혀 하지 않는다 (배터리 절약)
+function MeshOff({ onTurnOn }: { onTurnOn: () => void }) {
+  const insets = useSafeAreaInsets();
+  return (
+    <View style={[styles.root, styles.offRoot, { paddingTop: insets.top + 16 }]}>
+      <View style={styles.titleRow}>
+        <Text style={styles.title}>근처 메시</Text>
+        <View style={styles.switchRow}>
+          <Text style={styles.switchLabel}>꺼짐</Text>
+          <Switch value={false} onValueChange={() => onTurnOn()} />
+        </View>
+      </View>
+      <Text style={styles.offText}>
+        켜면 인터넷 없이도 근처 기기와 블루투스로 메시지를 주고받고, 연결된 기기 구조를 트리로 보여줍니다.
+      </Text>
+      <Text style={styles.offText}>
+        켜 두는 동안 블루투스 광고·스캔을 계속하므로 배터리를 더 사용합니다. 필요할 때만 켜 주세요. 끄면 연결이
+        모두 끊기고 대화 내용과 기기 목록은 사라집니다.
+      </Text>
+      <TouchableOpacity style={styles.onBtn} onPress={onTurnOn}>
+        <Text style={styles.btnText}>메시 켜기</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
 export default function MeshScreen() {
-  return <BleChat />;
+  // 앱을 켤 때는 항상 꺼진 상태로 시작
+  const [enabled, setEnabled] = useState(false);
+  return enabled ? (
+    <BleChat onTurnOff={() => setEnabled(false)} />
+  ) : (
+    <MeshOff onTurnOn={() => setEnabled(true)} />
+  );
 }
 
 const styles = StyleSheet.create({
@@ -518,6 +697,25 @@ const styles = StyleSheet.create({
   sub: { fontSize: 13, color: '#555', marginTop: 4 },
   subSmall: { fontSize: 12, color: '#888', marginTop: 2 },
   peers: { fontSize: 14, color: '#1565c0', fontWeight: '600', marginTop: 4 },
+  tree: {
+    maxHeight: 130,
+    marginTop: 6,
+    padding: 8,
+    backgroundColor: '#f5f7fa',
+    borderRadius: 8,
+  },
+  treeLine: {
+    fontSize: 13,
+    lineHeight: 18,
+    color: '#111',
+    fontFamily: Platform.OS === 'android' ? 'monospace' : 'Menlo',
+  },
+  treeFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 6,
+  },
   log: { flex: 1, padding: 12 },
   logLine: { fontSize: 15, color: '#222', paddingVertical: 4 },
   eventLine: { fontSize: 12, color: '#555', paddingVertical: 2 },
@@ -546,4 +744,16 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   btnText: { color: '#fff', fontWeight: '600' },
+  switchRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  switchLabel: { fontSize: 12, color: '#555' },
+  offRoot: { paddingHorizontal: 16 },
+  offText: { marginTop: 14, fontSize: 14, lineHeight: 21, color: '#374151' },
+  onBtn: {
+    marginTop: 22,
+    height: 46,
+    borderRadius: 10,
+    backgroundColor: '#1565c0',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
 });

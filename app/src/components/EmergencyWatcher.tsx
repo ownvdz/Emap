@@ -35,6 +35,7 @@ import type { Category } from '../core/categories';
 import { GENERIC_GUIDANCE, GUIDANCE } from '../core/guidance';
 import { getCurrentPosition, ensureLocationPermission } from '../core/location';
 import { requestMap, type NearestInfo } from '../core/mapBus';
+import { initPush, subscribePushAlert } from '../core/push';
 import type { Shelter } from '../core/shelters';
 
 // 어느 탭에 있어도 내 지역의 위급 문자를 감시하고 팝업으로 알려준다.
@@ -131,6 +132,28 @@ export default function EmergencyWatcher({ onShowMap }: { onShowMap: () => void 
       unsubSettings();
     };
   }, [poll]);
+
+  // 서버가 보낸 긴급재난·위급재난 푸시 → 같은 팝업으로 표시 (앱이 꺼져 있을 때는 알림을 눌렀을 때)
+  useEffect(() => {
+    const off = subscribePushAlert(async a => {
+      const seen = new Set(await readSeen());
+      if (seen.has(a.id) || known.current.has(a.id) || priority(a) === 0) {
+        return;
+      }
+      known.current.add(a.id);
+      try {
+        Vibration.vibrate([0, 300, 150, 300, 150, 300]);
+      } catch {
+        /* 진동을 쓸 수 없어도 팝업은 그대로 동작 */
+      }
+      setQueue(prev => sortQueue([...prev, a]));
+    });
+    const stopPush = initPush(); // 푸시 구독·수신 시작 (위의 듣기 등록 뒤에 시작해야 놓치지 않음)
+    return () => {
+      off();
+      stopPush();
+    };
+  }, []);
 
   // 개발용 테스트 팝업
   useEffect(
