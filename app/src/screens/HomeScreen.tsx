@@ -14,6 +14,7 @@ import { useIsFocused } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { apiGet } from '../api';
 import { API_BASE_URL } from '../config';
+import { getPushStatus, syncPushTopics } from '../core/push';
 import { LEVEL_COLOR, POLL_MS, REGIONS, type Alert, type AlertResponse } from '../core/alerts';
 import {
   getSettings,
@@ -44,6 +45,19 @@ export default function HomeScreen() {
   const abortRef = useRef<AbortController | null>(null);
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState('');
+  const [pushInfo, setPushInfo] = useState('');
+  const [pushBusy, setPushBusy] = useState(false);
+
+  // 구독을 다시 시도하고 현재 푸시 상태를 보여준다
+  const checkPush = async () => {
+    setPushBusy(true);
+    try {
+      await syncPushTopics();
+      setPushInfo(await getPushStatus());
+    } finally {
+      setPushBusy(false);
+    }
+  };
 
   const checkServer = async () => {
     setChecking(true);
@@ -244,6 +258,14 @@ export default function HomeScreen() {
           )}
         </TouchableOpacity>
         {checkResult ? <Text style={styles.small}>{checkResult}</Text> : null}
+        <TouchableOpacity style={styles.serverBtn} onPress={checkPush} disabled={pushBusy}>
+          {pushBusy ? (
+            <ActivityIndicator color="#1565c0" />
+          ) : (
+            <Text style={styles.serverBtnText}>푸시 상태 확인</Text>
+          )}
+        </TouchableOpacity>
+        {pushInfo ? <Text style={styles.small}>{pushInfo}</Text> : null}
       </View>
     </View>
   );
