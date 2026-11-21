@@ -6,12 +6,35 @@ import { decodeEntities } from './utils/text.js';
 import { fetchAlerts, REGIONS } from './alerts.js';
 import { getRegionTree } from './regions.js';
 import { startPushWorker } from './push.js';
+import { isValidToken, saveToken } from './pushStore.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 
 app.use(cors({ origin: 'http://localhost:5173' }));
 app.use(express.json());
+
+app.set('trust proxy', 'loopback'); // Caddy 뒤에서 실제 접속자 IP를 속도 제한에 쓰기 위함
+
+// 푸시 받을 기기 등록 (앱이 켜질 때마다 호출). 같은 IP에서 10분에 20번까지만 허용
+const registerHits = new Map(); // ip -> { count, resetAt }
+app.post('/api/push/register', async (req, res) => {
+  const now = Date.now();
+  const hit = registerHits.get(req.ip);
+  if (!hit || now > hit.resetAt) registerHits.set(req.ip, { count: 1, resetAt: now + 10 * 60_000 });
+  else if (++hit.count > 20) return res.status(429).json({ error: '요청이 너무 많습니다.' });
+
+  const token = req.body?.token;
+  if (!isValidToken(token)) return res.status(400).json({ error: '잘못된 토큰입니다.' });
+  try {
+    const saved = await saveToken(token);
+    if (!saved) return res.status(507).json({ error: '등록 가능한 기기 수를 넘었습니다.' });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('push register error:', e.message);
+    res.status(500).json({ error: '등록하지 못했습니다.' });
+  }
+});
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });

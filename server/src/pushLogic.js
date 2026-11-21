@@ -1,8 +1,4 @@
 // 푸시 알림의 순수 로직 (네트워크·Firebase 없이 테스트할 수 있도록 따로 둠)
-// ※ 토픽 이름(NATIONWIDE_TOPIC)은 앱의 app/src/core/pushTopics.ts 와 반드시 같아야 한다.
-
-// 긴급재난·위급재난은 지역과 관계없이 전국 모든 기기에 보낸다. 앱은 실행하면 이 토픽을 구독한다.
-export const NATIONWIDE_TOPIC = 'alert_all';
 
 // 푸시를 보낼 문자인지: 위급재난은 항상, 긴급재난은 훈련 문자가 아닐 때 (앱 팝업 기준과 같음)
 export function qualifies(alert) {
@@ -41,12 +37,13 @@ export function pickNew(rows, { sent, primed, now, primeWindowMs, maxAgeMs }) {
   return out;
 }
 
-// FCM 메시지 만들기. 같은 문자가 여러 토픽으로 가도 기기에서는 tag(문자 id)가 같아 한 개로 합쳐진다.
-export function buildMessages(alert, topics) {
+// FCM 메시지 만들기. targets는 [{ token }] 처럼 FCM이 받는 대상 필드 객체의 배열이다.
+// 같은 문자가 두 번 가도 기기에서는 tag(문자 id)가 같아 한 개로 합쳐진다.
+export function buildMessages(alert, targets) {
   const title = `[${alert.level}] ${alert.type || '재난'}`.slice(0, 60);
   const body = String(alert.message).slice(0, 300);
-  return topics.map((topic) => ({
-    topic,
+  return targets.map((target) => ({
+    ...target,
     notification: { title, body },
     data: {
       kind: 'alert',

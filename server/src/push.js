@@ -1,8 +1,9 @@
 import axios from 'axios';
 import { API_URL, PAGE_SIZE, extractItems, normalize, toYmd } from './alerts.js';
-import { NATIONWIDE_TOPIC, buildMessages, pickNew } from './pushLogic.js';
+import { buildMessages, pickNew } from './pushLogic.js';
+import { listTokens, removeTokens } from './pushStore.js';
 
-// 긴급재난·위급재난 문자를 감지해서 전국 모든 기기에 FCM 푸시를 보낸다.
+// 긴급재난·위급재난 문자를 감지해서 등록된 모든 기기에 FCM 푸시를 보낸다. (기기 토큰은 앱이 /api/push/register로 등록)
 // 켜는 방법(.env):
 //   PUSH_ENABLED=1
 //   GOOGLE_APPLICATION_CREDENTIALS=/home/ubuntu/emap-fcm-key.json   (Firebase 서비스 계정 키 파일 경로. 레포 밖에 보관)
@@ -54,21 +55,47 @@ async function fetchTodayAll() {
   return { items: [...byId.values()], truncated: byId.size < total };
 }
 
+// 더 이상 쓸 수 없는 토큰(앱 삭제 등)을 나타내는 FCM 오류 코드
+const DEAD_TOKEN_CODES = new Set([
+  'messaging/registration-token-not-registered',
+  'messaging/invalid-registration-token',
+]);
+const BATCH = 500; // sendEach 한 번에 보낼 수 있는 최대 개수
+
+// 지역과 관계없이 등록된 모든 기기에 보낸다
 async function deliver(alert) {
-  const topics = [NATIONWIDE_TOPIC]; // 지역과 관계없이 전국 전체
-  const messages = buildMessages(alert, topics);
+  const tokens = await listTokens();
+  if (tokens.length === 0) {
+    console.log(`[push] 등록된 기기가 없어 보내지 않음: id=${alert.id}`);
+    return;
+  }
   if (!messagingApi) {
-    console.log(`[push][dry-run] ${alert.level} ${alert.type} id=${alert.id} region="${alert.region}" → 전국`);
+    console.log(
+      `[push][dry-run] ${alert.level} ${alert.type} id=${alert.id} region="${alert.region}" → 기기 ${tokens.length}대`
+    );
     console.log(`[push][dry-run] ${alert.message.slice(0, 80)}`);
     return;
   }
-  const res = await messagingApi.sendEach(messages);
+
+  let ok = 0;
+  let fail = 0;
+  const dead = [];
+  for (let i = 0; i < tokens.length; i += BATCH) {
+    const chunk = tokens.slice(i, i + BATCH);
+    const res = await messagingApi.sendEach(buildMessages(alert, chunk.map((token) => ({ token }))));
+    ok += res.successCount;
+    fail += res.failureCount;
+    res.responses.forEach((r, j) => {
+      if (r.success) return;
+      if (DEAD_TOKEN_CODES.has(r.error?.code)) dead.push(chunk[j]);
+      else console.error(`[push] 실패(토큰 …${chunk[j].slice(-6)}): ${r.error?.code} ${r.error?.message}`);
+    });
+  }
+  const removed = dead.length ? await removeTokens(dead) : 0;
   console.log(
-    `[push] 전송 ${alert.level} ${alert.type} id=${alert.id}: 성공 ${res.successCount}, 실패 ${res.failureCount}`
+    `[push] 전송 ${alert.level} ${alert.type} id=${alert.id}: 성공 ${ok}, 실패 ${fail}` +
+      (removed ? ` (무효 토큰 ${removed}개 삭제)` : '')
   );
-  res.responses.forEach((r, i) => {
-    if (!r.success) console.error(`[push] 실패 토픽=${topics[i]}: ${r.error?.code} ${r.error?.message}`);
-  });
 }
 
 async function pollOnce() {

@@ -16,3 +16,5 @@ Wallet_*
 a-indexs/
 
 app/android/app/google-services.json
+
+server/data/
