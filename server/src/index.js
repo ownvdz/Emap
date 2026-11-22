@@ -7,6 +7,7 @@ import { fetchAlerts, REGIONS } from './alerts.js';
 import { getRegionTree } from './regions.js';
 import { startPushWorker } from './push.js';
 import { isValidToken, saveToken } from './pushStore.js';
+import { createReport, listReports, resolveReport } from './reportsStore.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -16,14 +17,27 @@ app.use(express.json());
 
 app.set('trust proxy', 'loopback'); // Caddy 뒤에서 실제 접속자 IP를 속도 제한에 쓰기 위함
 
-// 푸시 받을 기기 등록 (앱이 켜질 때마다 호출). 같은 IP에서 10분에 20번까지만 허용
-const registerHits = new Map(); // ip -> { count, resetAt }
-app.post('/api/push/register', async (req, res) => {
-  const now = Date.now();
-  const hit = registerHits.get(req.ip);
-  if (!hit || now > hit.resetAt) registerHits.set(req.ip, { count: 1, resetAt: now + 10 * 60_000 });
-  else if (++hit.count > 20) return res.status(429).json({ error: '요청이 너무 많습니다.' });
+// 같은 IP의 요청 횟수 제한 (Caddy 뒤라 trust proxy 설정으로 실제 접속자 IP를 씀). 만료된 기록은 주기적으로 정리
+function makeLimiter(max, windowMs) {
+  const hits = new Map(); // ip -> { count, resetAt }
+  setInterval(() => {
+    const now = Date.now();
+    for (const [ip, h] of hits) if (now > h.resetAt) hits.delete(ip);
+  }, 10 * 60_000).unref();
+  return (req, res, next) => {
+    const now = Date.now();
+    const h = hits.get(req.ip);
+    if (!h || now > h.resetAt) {
+      hits.set(req.ip, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+    if (++h.count > max) return res.status(429).json({ error: '요청이 너무 많습니다.' });
+    next();
+  };
+}
 
+// 푸시 받을 기기 등록 (앱이 켜질 때마다 호출). 같은 IP에서 10분에 20번까지만 허용
+app.post('/api/push/register', makeLimiter(20, 10 * 60_000), async (req, res) => {
   const token = req.body?.token;
   if (!isValidToken(token)) return res.status(400).json({ error: '잘못된 토큰입니다.' });
   try {
@@ -33,6 +47,37 @@ app.post('/api/push/register', async (req, res) => {
   } catch (e) {
     console.error('push register error:', e.message);
     res.status(500).json({ error: '등록하지 못했습니다.' });
+  }
+});
+
+// 구조 요청·위험 제보 (인터넷이 되는 경우의 경로). 로직은 reportsStore.js, 여기서는 응답만 연결
+const reply = (res, r) => res.status(r.status).json(r.body);
+const reportError = (res, e) => {
+  console.error('reports error:', e.message);
+  res.status(500).json({ error: '처리하지 못했습니다.' });
+};
+
+app.post('/api/reports', makeLimiter(10, 10 * 60_000), async (req, res) => {
+  try {
+    reply(res, await createReport(req.body));
+  } catch (e) {
+    reportError(res, e);
+  }
+});
+
+app.get('/api/reports', makeLimiter(120, 60_000), async (req, res) => {
+  try {
+    reply(res, await listReports(req.query, req.get('x-owner-key')));
+  } catch (e) {
+    reportError(res, e);
+  }
+});
+
+app.post('/api/reports/:id/resolve', makeLimiter(20, 10 * 60_000), async (req, res) => {
+  try {
+    reply(res, await resolveReport(req.params.id, req.body));
+  } catch (e) {
+    reportError(res, e);
   }
 });
 

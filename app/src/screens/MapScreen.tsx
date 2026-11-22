@@ -19,7 +19,10 @@ import {
   type Category,
 } from '../core/categories';
 import { ensureLocationPermission, getCurrentPosition } from '../core/location';
+import { describeOffset } from '../core/geo';
 import { subscribeMapRequest, takeMapRequest, type NearestInfo } from '../core/mapBus';
+import { getPins, removePin, subscribePins } from '../core/reportPins';
+import { KIND_COLOR, KIND_LABEL, ageText, subLabel, type Report } from '../core/reports';
 import { catsOf, groupByLocation, type Shelter } from '../core/shelters';
 
 const MAX_MARKERS = 300;
@@ -86,6 +89,16 @@ function MarkerView({ group }: { group: Shelter[] }) {
   );
 }
 
+// 구조 요청·위험 제보 핀. 아래 크기는 NaverMapMarkerOverlay의 width/height와 같아야 한다.
+const REPORT_PIN = 38;
+function ReportMarker({ report }: { report: Report }) {
+  return (
+    <View style={[styles.pin, { backgroundColor: KIND_COLOR[report.kind] }]}>
+      <Text style={styles.pinText}>{report.kind === 'sos' ? 'SOS' : '!'}</Text>
+    </View>
+  );
+}
+
 export default function MapScreen() {
   const insets = useSafeAreaInsets();
   const [selected, setSelected] = useState<Record<Category, boolean>>({ ...DEFAULT_SELECTED });
@@ -96,6 +109,8 @@ export default function MapScreen() {
   const [origin, setOrigin] = useState<{ lat: number; lng: number } | null>(null); // 내 위치
   const [nearest, setNearest] = useState<NearestInfo | null>(null); // 팝업에서 찾은 가장 가까운 대피소
   const [locating, setLocating] = useState(false);
+  const [pins, setPins] = useState<Report[]>(() => getPins()); // "지도에 반영"한 구조 요청·위험 제보
+  const [selectedReport, setSelectedReport] = useState<Report | null>(null);
 
   const mapRef = useRef<NaverMapViewRef>(null);
   const selectedRef = useRef(selected);
@@ -187,6 +202,16 @@ export default function MapScreen() {
       if (!req) {
         return;
       }
+      if (req.focusReportId) {
+        // 구조 요청·위험 제보를 "지도에 반영": 그 지점으로 이동하고 핀을 선택 (대피소 조회·종류 선택은 그대로)
+        const pin = getPins().find(r => r.id === req.focusReportId);
+        if (pin && pin.lat !== undefined && pin.lng !== undefined) {
+          setOpenGroup(null);
+          setSelectedReport(pin);
+          mapRef.current?.animateCameraTo({ latitude: pin.lat, longitude: pin.lng, zoom: 16, duration: 500 });
+        }
+        return;
+      }
       if (req.nearestOnly) {
         // 이미 지도가 열려 있으니 카메라·종류 선택은 그대로 두고 카드와 안내만 갱신
         setNearest(req.nearest ?? null);
@@ -241,6 +266,17 @@ export default function MapScreen() {
       }
     };
   }, []);
+
+  // 핀 목록이 바뀌면 지도에 반영 (해결·만료돼 사라진 핀은 선택 카드도 닫는다)
+  useEffect(
+    () =>
+      subscribePins(() => {
+        const list = getPins();
+        setPins(list);
+        setSelectedReport(cur => (cur && list.some(r => r.id === cur.id) ? cur : null));
+      }),
+    [],
+  );
 
   const flashNote = useCallback((text: string) => {
     if (noteTimer.current) {
@@ -311,7 +347,10 @@ export default function MapScreen() {
         style={styles.map}
         initialCamera={{ latitude: 37.4563, longitude: 126.7052, zoom: 14 }}
         onCameraIdle={handleIdle}
-        onTapMap={() => setOpenGroup(null)}>
+        onTapMap={() => {
+          setOpenGroup(null);
+          setSelectedReport(null);
+        }}>
         {origin ? (
           <NaverMapMarkerOverlay
             key="my-location"
@@ -333,11 +372,31 @@ export default function MapScreen() {
               width={size.width}
               height={size.height}
               anchor={{ x: 0.5, y: 0.5 }}
-              onTap={() => setOpenGroup(g)}>
+              onTap={() => {
+                setSelectedReport(null);
+                setOpenGroup(g);
+              }}>
               <MarkerView group={g} />
             </NaverMapMarkerOverlay>
           );
         })}
+        {pins.map(r =>
+          r.lat !== undefined && r.lng !== undefined ? (
+            <NaverMapMarkerOverlay
+              key={`report-${r.id}`}
+              latitude={r.lat}
+              longitude={r.lng}
+              width={REPORT_PIN}
+              height={REPORT_PIN}
+              anchor={{ x: 0.5, y: 0.5 }}
+              onTap={() => {
+                setOpenGroup(null);
+                setSelectedReport(r);
+              }}>
+              <ReportMarker report={r} />
+            </NaverMapMarkerOverlay>
+          ) : null,
+        )}
       </NaverMapView>
 
       {/* 위쪽: 종류 칩과 안내 */}
@@ -370,14 +429,64 @@ export default function MapScreen() {
 
       {/* 내 위치 버튼 */}
       <TouchableOpacity
-        style={[styles.locBtn, { bottom: openGroup ? 280 : nearest ? 130 : 24 }]}
+        style={[styles.locBtn, { bottom: openGroup ? 280 : selectedReport ? 190 : nearest ? 130 : 24 }]}
         onPress={goToMyLocation}
         disabled={locating}>
         <Text style={styles.locBtnText}>{locating ? '…' : '📍'}</Text>
       </TouchableOpacity>
 
+      {/* 아래: "지도에 반영"한 구조 요청·위험 제보 */}
+      {selectedReport && !openGroup ? (
+        <View style={styles.card}>
+          <TouchableOpacity style={styles.close} onPress={() => setSelectedReport(null)}>
+            <Text style={styles.closeText}>✕</Text>
+          </TouchableOpacity>
+          <View style={styles.titleRow}>
+            <View style={[styles.badge, { backgroundColor: KIND_COLOR[selectedReport.kind] }]}>
+              <Text style={styles.badgeText}>{KIND_LABEL[selectedReport.kind]}</Text>
+            </View>
+            <Text style={styles.name}>
+              {subLabel(selectedReport.kind, selectedReport.sub)}
+              {selectedReport.kind === 'sos' && (selectedReport.count ?? 1) > 1 ? ` · ${selectedReport.count}명` : ''}
+            </Text>
+          </View>
+          <Text style={styles.line}>
+            {ageText(selectedReport.at, Date.now())}
+            {selectedReport.posAge ? ` · ${selectedReport.posAge}분 전 위치` : ''}
+            {origin && selectedReport.lat !== undefined && selectedReport.lng !== undefined
+              ? ` · 내 위치에서 ${describeOffset(origin, { lat: selectedReport.lat, lng: selectedReport.lng })}`
+              : ''}
+          </Text>
+          {selectedReport.note ? <Text style={styles.line}>"{selectedReport.note}"</Text> : null}
+          <View style={styles.actions}>
+            <TouchableOpacity
+              style={styles.actionBtn}
+              onPress={() => {
+                removePin(selectedReport.id);
+                setSelectedReport(null);
+              }}>
+              <Text style={styles.actionText}>지도에서 지우기</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.actionBtn, styles.actionPrimary]}
+              onPress={() => {
+                if (selectedReport.lat !== undefined && selectedReport.lng !== undefined) {
+                  mapRef.current?.animateCameraTo({
+                    latitude: selectedReport.lat,
+                    longitude: selectedReport.lng,
+                    zoom: 16,
+                    duration: 500,
+                  });
+                }
+              }}>
+              <Text style={[styles.actionText, styles.actionPrimaryText]}>이 위치로 이동</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : null}
+
       {/* 아래: 팝업에서 찾은 가장 가까운 대피소 */}
-      {nearest && !openGroup ? (
+      {nearest && !openGroup && !selectedReport ? (
         <View style={styles.card}>
           <TouchableOpacity style={styles.close} onPress={() => setNearest(null)}>
             <Text style={styles.closeText}>✕</Text>
@@ -468,6 +577,16 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#fff',
   },
+  pin: {
+    width: REPORT_PIN,
+    height: REPORT_PIN,
+    borderRadius: REPORT_PIN / 2,
+    borderWidth: 3,
+    borderColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pinText: { color: '#fff', fontSize: 11, fontWeight: '800' },
   me: {
     width: 20,
     height: 20,

@@ -6,7 +6,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import EmergencyWatcher from './src/components/EmergencyWatcher';
 import HomeScreen from './src/screens/HomeScreen';
 import MapScreen from './src/screens/MapScreen';
-import MeshScreen from './src/screens/MeshScreen';
+import HelpScreen from './src/screens/HelpScreen';
 
 const Tab = createBottomTabNavigator();
 const navigationRef = createNavigationContainerRef();
@@ -19,7 +19,7 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <NavigationContainer ref={navigationRef}>
-        {/* lazy: false → 앱을 켜자마자 모든 탭이 만들어짐 (블루투스 메시는 '근처 메시' 탭에서 직접 켤 때만 시작) */}
+        {/* lazy: false → 앱을 켜자마자 모든 탭이 만들어짐 (블루투스는 '구조·제보' 탭에서 오프라인 기능을 사용할 때만 시작) */}
         <Tab.Navigator
           screenOptions={{
             headerShown: false,
@@ -28,7 +28,7 @@ export default function App() {
           }}>
           <Tab.Screen name="홈" component={HomeScreen} options={{ tabBarIcon: icon('🏠') }} />
           <Tab.Screen name="지도" component={MapScreen} options={{ tabBarIcon: icon('🗺️') }} />
-          <Tab.Screen name="근처 메시" component={MeshScreen} options={{ tabBarIcon: icon('📡') }} />
+          <Tab.Screen name="구조·제보" component={HelpScreen} options={{ tabBarIcon: icon('🆘') }} />
         </Tab.Navigator>
       </NavigationContainer>
 

@@ -10,13 +10,15 @@ export type NearestInfo = {
 // 재난 팝업에서 "대피장소 보기"를 눌렀을 때 지도 탭에 요청을 전달하는 통로
 // - origin/nearest가 있으면 내 위치 기준, 없으면 center(선택한 지역의 중심) 기준
 export type MapRequest = {
-  categories: Category[];
+  categories: Category[]; // focusReportId만 쓸 때는 빈 배열
   center?: { lat: number; lng: number };
   origin?: { lat: number; lng: number };
   nearest?: NearestInfo;
   note?: string;
   // true면 지도를 다시 움직이지 않고 가장 가까운 곳 카드(nearest)와 안내만 갱신한다 (조회가 늦게 끝났을 때)
   nearestOnly?: boolean;
+  // 구조 요청·위험 제보를 "지도에 반영"했을 때: 그 지점으로 지도를 옮기고 해당 핀을 선택한다 (대피소 조회는 하지 않음)
+  focusReportId?: string;
   nonce: number;
 };
 
