@@ -26,7 +26,7 @@ import {
   writeCharacteristic,
 } from 'munim-bluetooth';
 
-import ReportPanel, { type Result } from '../components/ReportPanel';
+import type { Result } from '../components/ReportPanel';
 import type { LatLng } from '../core/geo';
 import { getIdentity, newMessageId } from '../core/identity';
 import {
@@ -40,7 +40,6 @@ import {
   type TreeLine,
 } from '../core/meshGraph';
 import { lastKnown, locate } from '../core/position';
-import { prunePins } from '../core/reportPins';
 import {
   bookActive,
   bookAdd,
@@ -140,14 +139,10 @@ type Wire = WireReport | WireResolve | Topo;
 const rand = () => Math.random().toString(36).slice(2, 8);
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
-type Props = {
-  onShowOnMap: (r: Report) => void;
-  onGoOnline: () => void;
-  onlineBack: boolean; // 인터넷이 다시 연결된 것이 확인됨
-};
-
-// 오프라인: 근처 기기와 블루투스로 구조 요청·위험 제보·취소/해결을 주고받는다 (이 화면이 보이는 동안 광고·스캔·연결 유지)
-export default function MeshReports({ onShowOnMap, onGoOnline, onlineBack }: Props) {
+// 근처 기기와 블루투스로 구조 요청·위험 제보·취소/해결을 주고받는 기능.
+// enabled가 true인 동안만 광고·스캔·연결을 유지하고, false가 되면 모두 끊고 받은 목록도 비운다.
+// (오프라인 화면은 항상 켜고, 온라인 화면에서는 사용자가 스위치로 켰을 때만 켠다)
+export function useMesh(enabled: boolean) {
   const aliveRef = useRef(true); // 화면이 사라지면 false가 되어 진행 중이던 작업이 중단됨
   const myId = useRef(rand().slice(0, 4)).current;
   const peers = useRef(new Set<string>()); // 내가 Central로 연결한 링크(BLE 주소)
@@ -174,7 +169,6 @@ export default function MeshReports({ onShowOnMap, onGoOnline, onlineBack }: Pro
   const [nodeCount, setNodeCount] = useState(1); // 나 포함 메시 전체
   const [lastTopo, setLastTopo] = useState('');
   const [events, setEvents] = useState<Line[]>([]); // 연결/오류 같은 시스템 이벤트
-  const [showDetail, setShowDetail] = useState(false);
   const [reports, setReports] = useState<Report[]>([]);
   const [pos, setPos] = useState<LatLng | null>(null);
 
@@ -196,7 +190,6 @@ export default function MeshReports({ onShowOnMap, onGoOnline, onlineBack }: Pro
     bookPrune(book.current, now);
     const list = bookActive(book.current, now);
     setReports(list);
-    prunePins(new Set(list.map(r => r.id)));
   }, []);
 
   // 내 위치 (거리 표시용). 저장된 위치를 먼저 쓰고, 새 위치를 얻으면 갱신
@@ -215,8 +208,37 @@ export default function MeshReports({ onShowOnMap, onGoOnline, onlineBack }: Pro
     getIdentity().then(id => {
       ownerRef.current = id.ownerId;
     });
-    refreshPos();
-  }, [refreshPos]);
+  }, []);
+
+  // 켜질 때 내 위치 확인 (거리 표시용). 꺼져 있을 때는 위치 권한도 요청하지 않는다
+  useEffect(() => {
+    if (enabled) {
+      refreshPos();
+    }
+  }, [enabled, refreshPos]);
+
+  // 꺼지면 받은 목록·이웃 정보를 모두 비운다
+  useEffect(() => {
+    if (enabled) {
+      return;
+    }
+    book.current = createBook();
+    graph.current = createGraph();
+    seen.current.clear();
+    directSeen.current.clear();
+    linkPeer.current.clear();
+    scanSeen.current.clear();
+    parseFails.current = 0;
+    maxPacket.current = 0;
+    setReports([]);
+    setDirect([]);
+    setTreeLines([]);
+    setNodeCount(1);
+    setLinkCount(0);
+    setEvents([]);
+    setLastTopo('');
+    setStatus('꺼짐');
+  }, [enabled]);
 
   // 직접 이웃을 확인했다고 기록 (pkt: 패킷을 직접 받음, scan: 광고 스캔에서 이름을 봄)
   const markDirect = useCallback((pid: string, kind: 'pkt' | 'scan') => {
@@ -462,6 +484,9 @@ export default function MeshReports({ onShowOnMap, onGoOnline, onlineBack }: Pro
 
   // 1분마다 알리고(기기마다 조금씩 어긋나게), 화면은 5초마다 만료만 처리 (통신 없음)
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
     let timer: ReturnType<typeof setTimeout>;
     const loop = () => {
       sendTopology();
@@ -478,9 +503,13 @@ export default function MeshReports({ onShowOnMap, onGoOnline, onlineBack }: Pro
         topoTimer.current = null;
       }
     };
-  }, [sendTopology, refreshView]);
+  }, [enabled, sendTopology, refreshView]);
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+    setStatus('시작 중...');
     aliveRef.current = true;
     const offs: Array<() => void> = [];
     const listen = (name: string, cb: (e: any) => void) => {
@@ -665,7 +694,7 @@ export default function MeshReports({ onShowOnMap, onGoOnline, onlineBack }: Pro
       peers.current.clear();
       connecting.current.clear();
     };
-  }, [log, myId, markDirect]);
+  }, [enabled, log, myId, markDirect]);
 
   // ---------- 양식 처리 ----------
   const submit = useCallback(
@@ -678,11 +707,14 @@ export default function MeshReports({ onShowOnMap, onGoOnline, onlineBack }: Pro
       if (activeMine >= MAX_MINE_ACTIVE) {
         return { error: `동시에 보낼 수 있는 요청은 ${MAX_MINE_ACTIVE}개까지입니다. 이전 요청을 취소·해결 처리해 주세요.` };
       }
-      const here = await locate(15000);
+      // 위험 제보는 지도에서 고른 위치를 쓸 수 있다
+      const here = d.pos ? { ...d.pos, ageMin: 0 } : await locate(15000);
       if (!here) {
         return { error: '현재 위치를 확인하지 못했습니다. 위치 권한과 GPS(실내에서는 창가)를 확인해 주세요.' };
       }
-      setPos(here);
+      if (!d.pos) {
+        setPos(here);
+      }
       const report: Report = {
         id: newMessageId(),
         kind: d.kind,
@@ -731,29 +763,48 @@ export default function MeshReports({ onShowOnMap, onGoOnline, onlineBack }: Pro
     [broadcast, myId, syncReports],
   );
 
-  const header = (
+  return {
+    status,
+    direct,
+    nodeCount,
+    reports,
+    pos,
+    submit,
+    resolve,
+    treeLines,
+    events,
+    lastTopo,
+    linkCount,
+    sendTopology,
+  };
+}
+
+export type Mesh = ReturnType<typeof useMesh>;
+
+// 연결 상태 요약 (이웃 수)
+export function MeshSummary({ mesh }: { mesh: Mesh }) {
+  return (
     <View style={styles.statusBox}>
-      <Text style={styles.statusLine}>{status}</Text>
+      <Text style={styles.statusLine}>{mesh.status}</Text>
       <Text style={styles.peers}>
-        직접 이웃 {direct.length}대 · 메시 전체 {nodeCount - 1}대
+        직접 이웃 {mesh.direct.length}대 · 메시 전체 {mesh.nodeCount - 1}대
       </Text>
-      {onlineBack ? (
-        <TouchableOpacity style={styles.backBanner} onPress={onGoOnline}>
-          <Text style={styles.backText}>인터넷이 다시 연결되었습니다. 눌러서 온라인으로 전환</Text>
-        </TouchableOpacity>
-      ) : null}
     </View>
   );
+}
 
-  const footer = (
+// 연결 상태 자세히 보기: 이웃 트리와 이벤트 로그
+export function MeshDetail({ mesh }: { mesh: Mesh }) {
+  const [show, setShow] = useState(false);
+  return (
     <View style={styles.detail}>
-      <TouchableOpacity onPress={() => setShowDetail(v => !v)}>
-        <Text style={styles.detailToggle}>{showDetail ? '▼ 연결 상태 접기' : '▶ 연결 상태 자세히 보기'}</Text>
+      <TouchableOpacity onPress={() => setShow(v => !v)}>
+        <Text style={styles.detailToggle}>{show ? '▼ 연결 상태 접기' : '▶ 연결 상태 자세히 보기'}</Text>
       </TouchableOpacity>
-      {showDetail ? (
+      {show ? (
         <View>
           <ScrollView style={styles.tree} nestedScrollEnabled>
-            {treeLines.map((l, i) => (
+            {mesh.treeLines.map((l, i) => (
               <Text key={`${l.id}-${i}`} style={styles.treeLine}>
                 {l.text}
               </Text>
@@ -761,14 +812,14 @@ export default function MeshReports({ onShowOnMap, onGoOnline, onlineBack }: Pro
           </ScrollView>
           <View style={styles.treeFooter}>
             <Text style={styles.subSmall}>
-              1분마다 갱신{lastTopo ? ` · 마지막 전송 ${lastTopo}` : ''} · 내가 연 연결 {linkCount}개
+              1분마다 갱신{mesh.lastTopo ? ` · 마지막 전송 ${mesh.lastTopo}` : ''} · 내가 연 연결 {mesh.linkCount}개
             </Text>
-            <TouchableOpacity style={styles.toggle} onPress={sendTopology}>
+            <TouchableOpacity style={styles.toggle} onPress={mesh.sendTopology}>
               <Text style={styles.toggleText}>지금 갱신</Text>
             </TouchableOpacity>
           </View>
           <ScrollView style={styles.events} nestedScrollEnabled>
-            {events.map(l => (
+            {mesh.events.map(l => (
               <Text key={l.key} style={styles.eventLine}>
                 {l.text}
               </Text>
@@ -778,28 +829,12 @@ export default function MeshReports({ onShowOnMap, onGoOnline, onlineBack }: Pro
       ) : null}
     </View>
   );
-
-  return (
-    <ReportPanel
-      mode="offline"
-      reports={reports}
-      pos={pos}
-      onSubmit={submit}
-      onResolve={resolve}
-      onShowOnMap={onShowOnMap}
-      header={header}
-      footer={footer}
-      emptyText="아직 받은 요청이 없습니다. 근처에 앱을 켠 기기가 있으면 자동으로 연결됩니다."
-    />
-  );
 }
 
 const styles = StyleSheet.create({
   statusBox: { marginBottom: 12, gap: 4 },
   statusLine: { fontSize: 13, color: '#555' },
   peers: { fontSize: 14, color: '#1565c0', fontWeight: '600' },
-  backBanner: { marginTop: 6, backgroundColor: '#DCFCE7', borderRadius: 10, padding: 12 },
-  backText: { color: '#166534', fontSize: 13, fontWeight: '600' },
   detail: { marginTop: 24, paddingTop: 12, borderTopWidth: 1, borderColor: '#e5e7eb' },
   detailToggle: { fontSize: 13, color: '#374151', fontWeight: '600', paddingVertical: 6 },
   toggle: { borderWidth: 1, borderColor: '#bbb', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 4 },

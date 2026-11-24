@@ -44,6 +44,8 @@ type Props = {
   onRefresh?: () => void;
   refreshing?: boolean;
   emptyText: string;
+  // 위험 제보에서 "지도에서 선택"을 눌렀을 때 지도 선택 화면을 열고, 고른 위치(취소하면 null)를 돌려준다
+  onPickLocation: (initial: LatLng | null) => Promise<LatLng | null>;
 };
 
 export default function ReportPanel({
@@ -58,11 +60,14 @@ export default function ReportPanel({
   onRefresh,
   refreshing,
   emptyText,
+  onPickLocation,
 }: Props) {
   const [form, setForm] = useState<Form>(null);
   const [sub, setSub] = useState('');
   const [count, setCount] = useState(1);
   const [note, setNote] = useState('');
+  const [locMode, setLocMode] = useState<'here' | 'map'>('here'); // 위험 제보 위치: 현재 위치 / 지도에서 선택
+  const [picked, setPicked] = useState<LatLng | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
@@ -90,6 +95,8 @@ export default function ReportPanel({
       setSub(SUBS[f][0].code);
       setCount(1);
       setNote('');
+      setLocMode('here');
+      setPicked(null);
     }
     setForm(f);
   };
@@ -98,9 +105,20 @@ export default function ReportPanel({
     if (sending || (form !== 'sos' && form !== 'hazard')) {
       return;
     }
+    const useMap = form === 'hazard' && locMode === 'map';
+    if (useMap && !picked) {
+      setError('지도에서 위치를 선택해 주세요.');
+      return;
+    }
     setSending(true);
     setError(null);
-    const res = await onSubmit({ kind: form, sub, count: form === 'sos' ? count : 1, note: note.trim() });
+    const res = await onSubmit({
+      kind: form,
+      sub,
+      count: form === 'sos' ? count : 1,
+      note: note.trim(),
+      ...(useMap && picked ? { pos: picked } : {}),
+    });
     setSending(false);
     if (res.error) {
       setError(res.error);
@@ -108,7 +126,16 @@ export default function ReportPanel({
     }
     setDone(res.info ?? `${KIND_LABEL[form]}을(를) ${mode === 'online' ? '인터넷으로' : '블루투스로'} 보냈습니다.`);
     setForm(null);
-  }, [sending, form, onSubmit, sub, count, note, mode]);
+  }, [sending, form, onSubmit, sub, count, note, mode, locMode, picked]);
+
+  const pick = async () => {
+    const p = await onPickLocation(picked ?? pos);
+    if (p) {
+      setPicked(p);
+      setLocMode('map');
+      setError(null);
+    }
+  };
 
   const resolve = (r: Report) => {
     Alert.alert('취소 및 해결', `${KIND_LABEL[r.kind]}(${subLabel(r.kind, r.sub)})을(를) 취소·해결 처리할까요?\n다른 사람의 목록과 지도에서도 사라집니다.`, [
@@ -158,7 +185,8 @@ export default function ReportPanel({
       {formKind ? (
         <View style={styles.form}>
           <Text style={styles.formTitle}>
-            {KIND_LABEL[formKind]} : 현재 위치{note.trim() ? `, "${note.trim()}"` : ''}
+            {KIND_LABEL[formKind]} : {formKind === 'hazard' && locMode === 'map' ? '지도에서 선택한 위치' : '현재 위치'}
+            {note.trim() ? `, "${note.trim()}"` : ''}
           </Text>
           <View style={styles.chips}>
             {SUBS[formKind].map(s => {
@@ -173,6 +201,27 @@ export default function ReportPanel({
               );
             })}
           </View>
+          {formKind === 'hazard' ? (
+            <View style={styles.locBox}>
+              <View style={styles.locRow}>
+                <TouchableOpacity
+                  style={[styles.locChip, locMode === 'here' && styles.locChipOn]}
+                  onPress={() => setLocMode('here')}>
+                  <Text style={[styles.locChipText, locMode === 'here' && styles.locChipTextOn]}>현재 위치</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.locChip, locMode === 'map' && styles.locChipOn]}
+                  onPress={pick}>
+                  <Text style={[styles.locChipText, locMode === 'map' && styles.locChipTextOn]}>🗺️ 지도에서 선택</Text>
+                </TouchableOpacity>
+              </View>
+              {locMode === 'map' && picked ? (
+                <Text style={styles.hint}>
+                  선택한 위치 {picked.lat.toFixed(5)}, {picked.lng.toFixed(5)} (눌러서 다시 선택)
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
           {formKind === 'sos' ? (
             <View style={styles.countRow}>
               <Text style={styles.label}>인원</Text>
@@ -306,6 +355,20 @@ const styles = StyleSheet.create({
   },
   chipText: { fontSize: 14, color: '#374151' },
   chipTextOn: { color: '#fff', fontWeight: '700' },
+  locBox: { gap: 6 },
+  locRow: { flexDirection: 'row', gap: 8 },
+  locChip: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+    backgroundColor: '#fff',
+  },
+  locChipOn: { borderColor: '#F97316', backgroundColor: '#FFF7ED' },
+  locChipText: { fontSize: 13, color: '#374151' },
+  locChipTextOn: { color: '#C2410C', fontWeight: '700' },
   countRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   label: { fontSize: 14, color: '#374151' },
   step: {

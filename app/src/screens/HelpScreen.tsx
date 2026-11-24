@@ -1,27 +1,30 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
   Platform,
   StatusBar,
   StyleSheet,
+  Switch,
   Text,
   TouchableOpacity,
   View,
 } from 'react-native';
 import { useIsFocused, useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import LocationPicker from '../components/LocationPicker';
 import ReportPanel, { type Result } from '../components/ReportPanel';
 import type { LatLng } from '../core/geo';
 import { lastKnown, locate } from '../core/position';
 import { checkOnline, fetchReports, postReport, resolveReportOnline } from '../core/reportApi';
 import { requestMap } from '../core/mapBus';
-import { addPin, clearPins, prunePins } from '../core/reportPins';
+import { addPin, prunePins } from '../core/reportPins';
 import type { Draft, Report } from '../core/reports';
-import MeshReports from './MeshScreen';
+import { MeshDetail, MeshSummary, useMesh } from './MeshScreen';
 
 // 구조·제보 탭. 인터넷이 되면 서버를 통해 주변 사람들과 주고받고,
 // 인터넷이 없으면 안내 후(사용자가 허용하면) 블루투스 화면으로 바꾼다.
+// 온라인 화면에서도 스위치를 켜면 블루투스로 근처 오프라인 기기의 신호를 함께 받는다.
 const POLL_MS = 20_000; // 화면을 보고 있는 동안 목록 갱신·연결 확인 간격
 
 const OFFLINE_ASK = '인터넷에 연결이 되지 않았습니다. 오프라인 기능을 사용하시겠어요?';
@@ -38,6 +41,12 @@ export default function HelpScreen() {
   const [pos, setPos] = useState<LatLng | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [bleOn, setBleOn] = useState(false); // 온라인 화면에서 블루투스 신호도 받기
+  const [picker, setPicker] = useState<{ initial: LatLng | null } | null>(null);
+  const pickerDone = useRef<((p: LatLng | null) => void) | null>(null);
+
+  // 오프라인 화면이거나 온라인에서 스위치를 켰을 때만 블루투스를 쓴다
+  const mesh = useMesh(mode === 'offline' || bleOn);
 
   const modeRef = useRef(mode);
   modeRef.current = mode;
@@ -54,14 +63,12 @@ export default function HelpScreen() {
   }, []);
 
   const goOffline = useCallback(() => {
-    clearPins(); // 인터넷으로 받은 핀은 지도에서 내린다
-    setReports([]);
+    setReports([]); // 인터넷으로 받은 목록은 비운다 (지도 핀도 아래 효과로 함께 정리)
     setOnlineBack(false);
     setMode('offline');
   }, []);
 
   const goOnline = useCallback(() => {
-    clearPins(); // 블루투스로 받은 핀은 지도에서 내린다 (목록도 함께 사라짐)
     askedRef.current = false;
     setOnlineBack(false);
     setNet('checking');
@@ -112,7 +119,6 @@ export default function HelpScreen() {
           return;
         }
         setReports(list);
-        prunePins(new Set(list.map(r => r.id)));
         setLoadError(null);
         setNet('ok');
         askedRef.current = false;
@@ -214,12 +220,15 @@ export default function HelpScreen() {
 
   const onSubmit = useCallback(
     async (d: Draft): Promise<Result> => {
-      const here = await locate(15000);
+      // 위험 제보는 지도에서 고른 위치를 쓸 수 있다
+      const here = d.pos ? { ...d.pos, ageMin: 0 } : await locate(15000);
       if (!here) {
         return { error: '현재 위치를 확인하지 못했습니다. 위치 권한과 GPS를 확인해 주세요.' };
       }
-      posRef.current = here;
-      setPos(here);
+      if (!d.pos) {
+        posRef.current = here;
+        setPos(here);
+      }
       try {
         await postReport(d, here);
       } catch (e) {
@@ -240,6 +249,9 @@ export default function HelpScreen() {
 
   const onResolve = useCallback(
     async (r: Report): Promise<Result> => {
+      if (r.via === 'ble') {
+        return mesh.resolve(r);
+      }
       try {
         await resolveReportOnline(r.id);
       } catch (e) {
@@ -252,11 +264,10 @@ export default function HelpScreen() {
         return { error: (e as Error).message };
       }
       setReports(prev => prev.filter(x => x.id !== r.id));
-      prunePins(new Set(reports.filter(x => x.id !== r.id).map(x => x.id)));
       load({ quiet: true });
       return {};
     },
-    [askOffline, load, reports],
+    [askOffline, load, mesh],
   );
 
   const refresh = useCallback(async () => {
@@ -271,6 +282,31 @@ export default function HelpScreen() {
     }
     setRefreshing(false);
   }, [askOffline, load, refreshPos]);
+
+  // 화면에 보여줄 목록: 오프라인이면 블루투스로 받은 것, 온라인이면 서버 목록 + (스위치를 켰다면) 블루투스로 받은 것
+  const shown = useMemo(
+    () => (mode === 'offline' ? mesh.reports : bleOn ? [...reports, ...mesh.reports] : reports),
+    [mode, bleOn, reports, mesh.reports],
+  );
+
+  // 목록에서 사라진(해결·만료·꺼짐) 요청의 지도 핀을 정리
+  useEffect(() => {
+    prunePins(new Set(shown.map(r => r.id)));
+  }, [shown]);
+
+  const pickLocation = useCallback(
+    (initial: LatLng | null) =>
+      new Promise<LatLng | null>(resolve => {
+        pickerDone.current = resolve;
+        setPicker({ initial });
+      }),
+    [],
+  );
+  const closePicker = (p: LatLng | null) => {
+    pickerDone.current?.(p);
+    pickerDone.current = null;
+    setPicker(null);
+  };
 
   // Android 15+(API 35+)는 앱이 시스템 바 아래까지 그려지므로 키보드 높이를 직접 처리
   const needsKeyboardAvoid = Platform.OS === 'ios' || (Platform.OS === 'android' && Platform.Version >= 35);
@@ -298,40 +334,84 @@ export default function HelpScreen() {
 
       <KeyboardAvoidingView style={styles.flex} behavior="padding" enabled={needsKeyboardAvoid}>
         {offline ? (
-          <MeshReports onShowOnMap={showOnMap} onGoOnline={goOnline} onlineBack={onlineBack} />
+          <ReportPanel
+            mode="offline"
+            reports={mesh.reports}
+            pos={mesh.pos}
+            onSubmit={mesh.submit}
+            onResolve={onResolve}
+            onShowOnMap={showOnMap}
+            onPickLocation={pickLocation}
+            emptyText="아직 받은 요청이 없습니다. 근처에 앱을 켠 기기가 있으면 자동으로 연결됩니다."
+            header={
+              <View>
+                <MeshSummary mesh={mesh} />
+                {onlineBack ? (
+                  <TouchableOpacity style={styles.backBanner} onPress={goOnline}>
+                    <Text style={styles.backText}>인터넷이 다시 연결되었습니다. 눌러서 온라인으로 전환</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+            }
+            footer={<MeshDetail mesh={mesh} />}
+          />
         ) : (
           <ReportPanel
             mode="online"
-            reports={reports}
+            reports={shown}
             pos={pos}
             onSubmit={onSubmit}
             onResolve={onResolve}
             onShowOnMap={showOnMap}
+            onPickLocation={pickLocation}
             onRefresh={refresh}
             refreshing={refreshing}
             emptyText={
               net === 'down' ? '인터넷에 연결되어 있지 않아 목록을 불러오지 못했습니다.' : '주변 30km 안에 등록된 요청·제보가 없습니다.'
             }
             header={
-              net === 'down' ? (
-                <View style={styles.downBox}>
-                  <Text style={styles.downText}>인터넷에 연결되어 있지 않습니다.</Text>
-                  <View style={styles.downRow}>
-                    <TouchableOpacity style={styles.downBtn} onPress={refresh}>
-                      <Text style={styles.downBtnText}>다시 확인</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity style={[styles.downBtn, styles.downPrimary]} onPress={() => askOffline(true)}>
-                      <Text style={[styles.downBtnText, { color: '#fff' }]}>오프라인 기능 사용</Text>
-                    </TouchableOpacity>
+              <View>
+                {net === 'down' ? (
+                  <View style={styles.downBox}>
+                    <Text style={styles.downText}>인터넷에 연결되어 있지 않습니다.</Text>
+                    <View style={styles.downRow}>
+                      <TouchableOpacity style={styles.downBtn} onPress={refresh}>
+                        <Text style={styles.downBtnText}>다시 확인</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={[styles.downBtn, styles.downPrimary]} onPress={() => askOffline(true)}>
+                        <Text style={[styles.downBtnText, { color: '#fff' }]}>오프라인 기능 사용</Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
+                ) : loadError ? (
+                  <Text style={styles.loadError}>{loadError}</Text>
+                ) : null}
+                <View style={styles.bleBox}>
+                  <View style={styles.bleRow}>
+                    <View style={styles.bleTexts}>
+                      <Text style={styles.bleTitle}>오프라인 신호도 받기 (블루투스)</Text>
+                      <Text style={styles.bleSub}>
+                        인터넷이 없는 근처 기기가 블루투스로 보낸 요청·제보를 함께 받습니다. 켜 두는 동안 배터리를 더 사용합니다.
+                      </Text>
+                    </View>
+                    <Switch value={bleOn} onValueChange={setBleOn} />
+                  </View>
+                  {bleOn ? <MeshSummary mesh={mesh} /> : null}
                 </View>
-              ) : loadError ? (
-                <Text style={styles.loadError}>{loadError}</Text>
-              ) : null
+              </View>
             }
+            footer={bleOn ? <MeshDetail mesh={mesh} /> : null}
           />
         )}
       </KeyboardAvoidingView>
+
+      {picker ? (
+        <LocationPicker
+          initial={picker.initial}
+          onConfirm={p => closePicker(p)}
+          onCancel={() => closePicker(null)}
+        />
+      ) : null}
     </View>
   );
 }
@@ -377,4 +457,11 @@ const styles = StyleSheet.create({
   downPrimary: { backgroundColor: '#1565c0', borderColor: '#1565c0' },
   downBtnText: { fontSize: 13, color: '#111', fontWeight: '600' },
   loadError: { marginBottom: 12, color: '#B91C1C', fontSize: 13 },
+  bleBox: { marginBottom: 12, padding: 12, borderRadius: 10, backgroundColor: '#F1F5F9', gap: 6 },
+  bleRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  bleTexts: { flex: 1 },
+  bleTitle: { fontSize: 14, fontWeight: '700', color: '#111' },
+  bleSub: { fontSize: 12, color: '#6b7280', marginTop: 2 },
+  backBanner: { marginBottom: 12, backgroundColor: '#DCFCE7', borderRadius: 10, padding: 12 },
+  backText: { color: '#166534', fontSize: 13, fontWeight: '600' },
 });

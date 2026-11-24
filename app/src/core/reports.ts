@@ -34,7 +34,8 @@ export const MAX_PACKET_BYTES = 150;
 const MAX_BOOK = 200;
 const MAX_TOMBS = 500;
 
-export type Draft = { kind: ReportKind; sub: string; count: number; note: string };
+// pos: 위험 제보에서 지도로 고른 위치 (없으면 현재 위치)
+export type Draft = { kind: ReportKind; sub: string; count: number; note: string; pos?: { lat: number; lng: number } };
 
 export type Report = {
   id: string;
